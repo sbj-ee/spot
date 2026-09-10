@@ -7,14 +7,18 @@ Android-first MVP for a Google Pixel 9 (Flutter). Product notes:
 
 Public repo: https://github.com/sbj-ee/spot
 
-## What v0 does
+## What v0.1.1 does
 
 - Single high-contrast screen
-- **Mark Spot** — saves lat/lon, accuracy, timestamp (local only)
+- **Mark Spot** — high-accuracy GNSS mark (not the first cached fix):
+  - `LocationAccuracy.bestForNavigation` + Android LocationManager (`forceLocationManager`)
+  - ~2s GPS warm-up, then average ≥5 samples with horizontal accuracy ≤ ~5 m (~16 ft)
+  - Live **Ready / Waiting for better fix** with ±ft; Mark prompts **Mark anyway** if still weak
+  - Discards coarse / jump outliers while sampling
 - Live arrow = device compass heading vs bearing-to-spot
 - Distance in **feet** under ~0.5 mi, else **miles**
 - **Replace** / **Clear** (one spot only)
-- Shows live GPS **±accuracy** and **fix age** (parking garages will look weak — that is honest, not a bug)
+- Shows live GPS **±accuracy** and **fix age**
 - Offline after mark (no map tiles, no account)
 
 ## Non-goals (v0)
@@ -23,12 +27,18 @@ No cloud, no multi-spot list, no turn-by-turn, no AR, no iOS TestFlight yet (iOS
 
 ## Install on Pixel 9
 
-### A. Sideload release APK (easiest)
+Prefer reinstall over the existing install:
 
-1. On the Pixel: **Settings → Apps → Special app access → Install unknown apps** — allow your browser/Files.
-2. Download the latest `app-release.apk` from this repo’s [Releases](https://github.com/sbj-ee/spot/releases) (or copy `build/app/outputs/flutter-apk/app-release.apk` if you built locally).
-3. Open the APK → Install → Open **Spot**.
-4. Grant **precise location** when asked. Wave the phone in a figure-8 if the compass says calibrating.
+```bash
+adb install -r app-release.apk
+```
+
+### A. Sideload release APK
+
+1. Download `app-release.apk` from [Releases](https://github.com/sbj-ee/spot/releases).
+2. Or with USB debugging (Developer options on): `adb install -r app-release.apk`
+3. Open **Spot** → grant **precise location**. Wave the phone in a figure-8 if the compass says calibrating.
+4. Stand outdoors, wait until status shows **Ready** (±16 ft or better), then **MARK SPOT**.
 
 ### B. USB debug with Flutter
 
@@ -36,7 +46,6 @@ No cloud, no multi-spot list, no turn-by-turn, no AR, no iOS TestFlight yet (iOS
 git clone https://github.com/sbj-ee/spot.git
 cd spot
 flutter pub get
-# enable Developer options + USB debugging on the Pixel, plug in
 flutter devices
 flutter run --release
 ```
@@ -50,7 +59,8 @@ flutter build apk --release
 
 ## Known limits
 
-- Indoor / underground parking: GPS accuracy will spike; trust the ±ft readout.
+- Indoor / underground parking: GPS accuracy will spike; trust the ±ft readout and wait for Ready outdoors.
+- First few seconds after Mark can still warm the GNSS radio — let it finish sampling.
 - Compass near cars/metal can skew; step a few feet away when marking if the arrow feels wrong.
 - No background tracking with screen off in v0.
 - One spot only (by design).

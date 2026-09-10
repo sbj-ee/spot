@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +6,7 @@ import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'geo_math.dart';
+import 'precise_mark.dart';
 import 'spot_store.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -74,15 +74,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
     await _posSub?.cancel();
     _posSub = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.best,
-        distanceFilter: 0,
-      ),
+      locationSettings: highAccuracySettings(),
     ).listen((pos) {
       if (!mounted) return;
       setState(() {
         _here = pos;
-        _status = null;
+        if (_busy) return; // mark flow owns status while sampling
+        if (pos.accuracy <= kReadyAccuracyMeters) {
+          _status = 'Ready · ${formatAccuracyFeet(pos.accuracy)}';
+        } else {
+          _status = 'Waiting for better fix · ${formatAccuracyFeet(pos.accuracy)}';
+        }
       });
     }, onError: (e) {
       if (!mounted) return;
@@ -102,42 +104,102 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _status = (_status ?? '') + ' (no compass)');
     }
 
-    // Seed one fix quickly
+    // Seed from last known only (do not treat as mark-quality).
     try {
       final last = await Geolocator.getLastKnownPosition();
-      if (last != null && mounted) setState(() => _here = last);
-      final cur = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.best),
-      );
-      if (mounted) setState(() => _here = cur);
+      if (last != null && mounted) {
+        setState(() {
+          _here = last;
+          _status = 'Waiting for better fix · ${formatAccuracyFeet(last.accuracy)}';
+        });
+      }
     } catch (_) {}
 
-    setState(() => _status = null);
+    if (mounted && _status == 'Checking location…') {
+      setState(() => _status = 'Waiting for GPS…');
+    }
     return true;
   }
 
-  Future<void> _markSpot() async {
+  Future<void> _markSpot({bool forceAnyway = false}) async {
     if (_busy) return;
-    setState(() => _busy = true);
+
+    final here = _here;
+    final ready = here != null && here.accuracy <= kReadyAccuracyMeters;
+    if (!forceAnyway && !ready) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          title: const Text('GPS not ready', style: TextStyle(color: Colors.white)),
+          content: Text(
+            here == null
+                ? 'No fix yet. Wait outdoors with a clear sky, or mark with a weaker fix.'
+                : 'Current accuracy ${formatAccuracyFeet(here.accuracy)} (want ≤ ±16 ft). '
+                    'Wait for Ready, or mark anyway.',
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, 'cancel'), child: const Text('Wait')),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'anyway'),
+              child: const Text('Mark anyway', style: TextStyle(color: Color(0xFFFFCC00))),
+            ),
+          ],
+        ),
+      );
+      if (choice != 'anyway') return;
+      forceAnyway = true;
+    }
+
+    setState(() {
+      _busy = true;
+      _status = 'Warming up GPS…';
+    });
     try {
       final ok = await _ensurePermissionsAndListen();
       if (!ok) return;
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.best),
+
+      // Prompt high-accuracy mode if services look coarse / off-path.
+      try {
+        final serviceOn = await Geolocator.isLocationServiceEnabled();
+        if (!serviceOn) {
+          await Geolocator.openLocationSettings();
+        }
+      } catch (_) {}
+
+      final result = await collectPreciseMark(
+        forceWithBest: forceAnyway,
+        onProgress: (msg, latest) {
+          if (!mounted) return;
+          setState(() {
+            _status = msg;
+            if (latest != null) _here = latest;
+          });
+        },
       );
+
+      if (result == null) {
+        if (!mounted) return;
+        setState(() => _status = 'Mark failed: no usable GPS samples');
+        return;
+      }
+
       final spot = SavedSpot(
-        latitude: pos.latitude,
-        longitude: pos.longitude,
-        accuracyMeters: pos.accuracy,
+        latitude: result.latitude,
+        longitude: result.longitude,
+        accuracyMeters: result.accuracyMeters,
         markedAt: DateTime.now(),
-        altitudeMeters: pos.altitude.isFinite ? pos.altitude : null,
+        altitudeMeters: result.altitudeMeters,
       );
       await _store.save(spot);
       await HapticFeedback.heavyImpact();
       if (!mounted) return;
       setState(() {
         _spot = spot;
-        _here = pos;
+        _status = result.forced
+            ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
+            : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples';
       });
     } catch (e) {
       if (!mounted) return;
@@ -211,6 +273,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
+    final gpsReady = here != null && here.accuracy <= kReadyAccuracyMeters;
     final gpsWeak = here != null && here.accuracy > 30; // ~100 ft
     final fixAge = formatFixAge(here?.timestamp);
     final accLabel = formatAccuracyFeet(here?.accuracy);
@@ -238,10 +301,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 _status ??
                     (here == null
                         ? 'Waiting for GPS…'
-                        : 'GPS $accLabel · $fixAge${gpsWeak ? ' · WEAK' : ''}'),
+                        : '${gpsReady ? 'Ready' : 'Waiting for better fix'} · $accLabel · $fixAge${gpsWeak ? ' · WEAK' : ''}'),
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: gpsWeak ? const Color(0xFFFF6666) : Colors.white70,
+                  color: gpsWeak
+                      ? const Color(0xFFFF6666)
+                      : (gpsReady ? const Color(0xFF66FF99) : Colors.white70),
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                 ),
@@ -296,10 +361,12 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 16),
               if (spot == null)
                 _BigButton(
-                  label: _busy ? 'MARKING…' : 'MARK SPOT',
+                  label: _busy
+                      ? 'MARKING…'
+                      : (gpsReady ? 'MARK SPOT' : 'MARK (WAIT / ANYWAY)'),
                   color: const Color(0xFFFFCC00),
                   textColor: Colors.black,
-                  onPressed: _busy ? null : _markSpot,
+                  onPressed: _busy ? null : () => _markSpot(),
                 )
               else ...[
                 _BigButton(
