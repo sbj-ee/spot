@@ -23,7 +23,22 @@ Public repo: https://github.com/sbj-ee/spot
 
 ## Non-goals (v0)
 
-No cloud, no multi-spot list, no turn-by-turn, no AR, no iOS TestFlight yet (iOS folder is scaffolded for later).
+No cloud, no multi-spot list, no turn-by-turn, no AR. iOS TestFlight packaging is in progress (see [docs/ios-testflight.md](docs/ios-testflight.md)).
+
+## iOS (TestFlight) — MacBook Air
+
+Bundle id: `ee.sbj.spot`. Full steps: [docs/ios-testflight.md](docs/ios-testflight.md).
+
+Short version (after Apple Developer enrollment is **active** — do not upload until then):
+
+```bash
+git clone https://github.com/sbj-ee/spot.git && cd spot
+flutter pub get
+open ios/Runner.xcworkspace   # Xcode: Runner → Signing & Capabilities → Team = your Apple Developer team
+flutter build ipa --release
+# Then Xcode Organizer → Distribute App → App Store Connect → TestFlight
+# Invite daughter via TestFlight Internal Testing
+```
 
 ## Install on Pixel 9
 

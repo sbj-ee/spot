@@ -45,5 +45,15 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Spot needs your precise location to mark a parking spot and show the arrow and distance back.</string>
+	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+	<dict>
+		<key>PreciseAccuracy</key>
+		<string>Precise location makes the mark accurate enough to find your car.</string>
+	</dict>
+	<key>NSMotionUsageDescription</key>
+	<string>Spot uses the compass to point the arrow toward your marked spot.</string>
 </dict>
 </plist>
