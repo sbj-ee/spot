@@ -27,7 +27,7 @@ No cloud, no multi-spot list, no turn-by-turn, no AR. iOS TestFlight packaging i
 
 ## iOS (TestFlight) — MacBook Air
 
-Bundle id: `ee.sbj.spot`. Full steps: [docs/ios-testflight.md](docs/ios-testflight.md).
+Bundle id: `ee.sbj.spot`. Min iOS **15.0** (Flutter 3.47). Full steps: [docs/ios-testflight.md](docs/ios-testflight.md).
 
 Short version (after Apple Developer enrollment is **active** — do not upload until then):
 

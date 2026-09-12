@@ -8,7 +8,7 @@ Target: put a try-build on a family iPhone (TestFlight). Android APK path is unc
 |------|--------|
 | Bundle ID | `ee.sbj.spot` |
 | Display name | Spot |
-| Min iOS | 13.0 |
+| Min iOS | **15.0** (required by Flutter 3.47+) |
 | Location | When In Use only (precise) |
 | Upload | **Only after** Apple Developer enrollment is active and Stephen confirms |
 
@@ -59,6 +59,10 @@ Or Archive from Xcode (Product → Archive).
 - `NSMotionUsageDescription` — compass arrow
 
 No Always location. No background tracking in v0.
+
+## Min iOS
+
+**15.0** — Flutter 3.47+ / Xcode 27 range. `ios/Podfile` sets `platform :ios, '15.0'`; Xcode `IPHONEOS_DEPLOYMENT_TARGET` matches.
 
 ## Blockers checklist
 
