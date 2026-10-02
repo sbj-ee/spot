@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 /// High-accuracy mark settings. Prefer GNSS over coarse network fixes.
@@ -20,6 +21,86 @@ const int kMinGoodSamples = 5;
 const Duration kMarkTimeout = Duration(seconds: 25);
 const Duration kWarmupIgnore = Duration(seconds: 2); // discard first fixes
 
+/// Key under NSLocationTemporaryUsageDescriptionDictionary in
+/// ios/Runner/Info.plist. Must match exactly, or iOS rejects the
+/// temporary full-accuracy request. Guarded by test/purpose_key_test.dart.
+const String kPreciseAccuracyPurposeKey = 'PreciseAccuracy';
+
+enum PreciseAccuracyOutcome {
+  /// Location was already precise.
+  precise,
+
+  /// Was reduced; the user granted temporary full accuracy (iOS).
+  upgraded,
+
+  /// Still reduced (user declined, or the platform can't ask in-app).
+  reduced,
+
+  /// Checking or requesting accuracy threw.
+  failed,
+}
+
+class PreciseAccuracyCheck {
+  const PreciseAccuracyCheck(this.outcome, [this.message]);
+
+  final PreciseAccuracyOutcome outcome;
+
+  /// User-facing warning, null when location is precise.
+  final String? message;
+
+  bool get isPrecise =>
+      outcome == PreciseAccuracyOutcome.precise ||
+      outcome == PreciseAccuracyOutcome.upgraded;
+}
+
+/// Make sure the OS gives us precise (not approximate) fixes before marking.
+///
+/// On iOS a reduced-accuracy grant can be lifted for this session with
+/// [requestTemporaryFullAccuracy] using [kPreciseAccuracyPurposeKey]. Android
+/// has no in-app temporary upgrade, so we only report it. Failures are
+/// returned (and logged), never swallowed.
+Future<PreciseAccuracyCheck> ensurePreciseAccuracy({
+  Future<LocationAccuracyStatus> Function()? getAccuracy,
+  Future<LocationAccuracyStatus> Function(String purposeKey)?
+  requestTemporaryFullAccuracy,
+  bool? canRequestTemporary,
+}) async {
+  final get = getAccuracy ?? Geolocator.getLocationAccuracy;
+  final request =
+      requestTemporaryFullAccuracy ??
+      (String key) => Geolocator.requestTemporaryFullAccuracy(purposeKey: key);
+  final canAsk =
+      canRequestTemporary ??
+      (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS);
+  try {
+    final status = await get();
+    if (status == LocationAccuracyStatus.precise) {
+      return const PreciseAccuracyCheck(PreciseAccuracyOutcome.precise);
+    }
+    if (!canAsk) {
+      return const PreciseAccuracyCheck(
+        PreciseAccuracyOutcome.reduced,
+        'Approximate location only. Turn on Precise location in Settings.',
+      );
+    }
+    final after = await request(kPreciseAccuracyPurposeKey);
+    if (after == LocationAccuracyStatus.precise) {
+      return const PreciseAccuracyCheck(PreciseAccuracyOutcome.upgraded);
+    }
+    return const PreciseAccuracyCheck(
+      PreciseAccuracyOutcome.reduced,
+      'Precise location declined. Mark will be approximate.',
+    );
+  } catch (e) {
+    debugPrint('Spot: precise accuracy check failed: $e');
+    return PreciseAccuracyCheck(
+      PreciseAccuracyOutcome.failed,
+      'Could not get precise location: $e',
+    );
+  }
+}
+
+
 class PreciseMarkResult {
   const PreciseMarkResult({
     required this.latitude,
@@ -28,6 +109,7 @@ class PreciseMarkResult {
     required this.sampleCount,
     required this.altitudeMeters,
     required this.forced,
+    this.accuracyWarning,
   });
 
   final double latitude;
@@ -36,6 +118,19 @@ class PreciseMarkResult {
   final int sampleCount;
   final double? altitudeMeters;
   final bool forced; // user overrode / timeout with best available
+
+  /// Set when the OS only gave approximate location (or the check failed).
+  final String? accuracyWarning;
+
+  PreciseMarkResult withAccuracyWarning(String? warning) => PreciseMarkResult(
+    latitude: latitude,
+    longitude: longitude,
+    accuracyMeters: accuracyMeters,
+    sampleCount: sampleCount,
+    altitudeMeters: altitudeMeters,
+    forced: forced,
+    accuracyWarning: warning,
+  );
 }
 
 bool isFixUsable(Position p, {required double maxAccuracyMeters}) {
@@ -98,15 +193,10 @@ Future<PreciseMarkResult?> collectPreciseMark({
   Duration timeout = kMarkTimeout,
   bool forceWithBest = false,
 }) async {
-  // Nudge Android into high-accuracy mode if location is on but coarse.
-  try {
-    final accuracy = await Geolocator.getLocationAccuracy();
-    if (accuracy == LocationAccuracyStatus.reduced) {
-      onProgress('Enable precise / high-accuracy location', null);
-      await Geolocator.requestTemporaryFullAccuracy(purposeKey: 'SpotMark');
-    }
-  } catch (_) {
-    // Android may not support temporary full accuracy; continue.
+  final accuracyCheck = await ensurePreciseAccuracy();
+  final accuracyWarning = accuracyCheck.message;
+  if (accuracyWarning != null) {
+    onProgress(accuracyWarning, null);
   }
 
   final started = DateTime.now();
@@ -125,7 +215,7 @@ Future<PreciseMarkResult?> collectPreciseMark({
     if (completer.isCompleted) return;
     timeoutTimer?.cancel();
     sub.cancel();
-    completer.complete(result);
+    completer.complete(result?.withAccuracyWarning(accuracyWarning));
   }
 
   timeoutTimer = Timer(timeout, () {

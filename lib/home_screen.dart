@@ -2,80 +2,158 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'geo_math.dart';
 import 'precise_mark.dart';
+import 'sensors.dart';
 import 'spot_store.dart';
 
+typedef PreciseMarkCollector = Future<PreciseMarkResult?> Function({
+  required void Function(String status, Position? latest) onProgress,
+  bool forceWithBest,
+});
+
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({
+    super.key,
+    this.sensors = const DeviceSensors(),
+    this.store,
+    this.collectMark,
+  });
+
+  final SpotSensors sensors;
+  final SpotStore? store;
+
+  /// Override for tests; defaults to [collectPreciseMark].
+  final PreciseMarkCollector? collectMark;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final _store = SpotStore();
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  late final SpotStore _store = widget.store ?? SpotStore();
 
   SavedSpot? _spot;
   Position? _here;
   double? _headingDeg; // device heading (0 = north)
   String? _status;
+
+  /// Sticky warning from the last mark (approximate location / failed
+  /// precise-accuracy check). Live GPS updates rewrite [_status], so this is
+  /// shown on its own line until the next mark.
+  String? _accuracyNote;
   bool _busy = false;
   StreamSubscription<Position>? _posSub;
-  StreamSubscription<CompassEvent>? _compassSub;
+  StreamSubscription<double?>? _compassSub;
   Timer? _ageTick;
+
+  /// False while the app is hidden/paused; sensors are stopped then.
+  bool _foreground = true;
+
+  /// Bumped on every start/stop so a slow async start that finishes after
+  /// the app went to the background doesn't attach listeners.
+  int _sensorGeneration = 0;
+
+  SpotSensors get _sensors => widget.sensors;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _bootstrap();
   }
 
   @override
   void dispose() {
-    _posSub?.cancel();
-    _compassSub?.cancel();
-    _ageTick?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _stopSensors();
     super.dispose();
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        if (!_foreground) return;
+        _foreground = false;
+        _stopSensors();
+      case AppLifecycleState.resumed:
+        if (_foreground) return;
+        _foreground = true;
+        // Re-check service + permission (user may be back from Settings),
+        // without prompting or bouncing to Settings again.
+        _ensurePermissionsAndListen(interactive: false);
+      case AppLifecycleState.inactive:
+        // Transient (permission sheets, app switcher): keep sensors running.
+        break;
+    }
+  }
+
+  void _stopSensors() {
+    _sensorGeneration++;
+    _posSub?.cancel();
+    _posSub = null;
+    _compassSub?.cancel();
+    _compassSub = null;
+    _ageTick?.cancel();
+    _ageTick = null;
+  }
+
+  /// True while the background sensors are attached (exposed for tests).
+  @visibleForTesting
+  bool get sensorsActive => _posSub != null || _ageTick != null;
 
   Future<void> _bootstrap() async {
     final spot = await _store.load();
     if (!mounted) return;
     setState(() => _spot = spot);
-    await _ensurePermissionsAndListen();
-    _ageTick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
+    await _ensurePermissionsAndListen(interactive: true);
   }
 
-  Future<bool> _ensurePermissionsAndListen() async {
-    setState(() => _status = 'Checking location…');
+  /// Checks location service + permission and starts the position stream,
+  /// compass and age timer if they aren't already running.
+  ///
+  /// [interactive] may show the OS permission prompt. [openSettingsIfBlocked]
+  /// (only on an explicit user tap) opens app Settings when permission is
+  /// denied, so resume never loops the user back into Settings.
+  Future<bool> _ensurePermissionsAndListen({
+    required bool interactive,
+    bool openSettingsIfBlocked = false,
+  }) async {
+    final gen = _sensorGeneration;
+    bool stale() => !mounted || !_foreground || gen != _sensorGeneration;
 
-    final serviceOn = await Geolocator.isLocationServiceEnabled();
+    if (!_busy) setState(() => _status = 'Checking location…');
+
+    final serviceOn = await _sensors.isLocationServiceEnabled();
+    if (stale()) return false;
     if (!serviceOn) {
       setState(() => _status = 'Turn on Location / GPS');
       return false;
     }
 
-    var perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) {
-      perm = await Geolocator.requestPermission();
+    var perm = await _sensors.checkPermission();
+    if (interactive && perm == LocationPermission.denied) {
+      perm = await _sensors.requestPermission();
     }
+    if (stale()) return false;
     if (perm == LocationPermission.denied ||
-        perm == LocationPermission.deniedForever) {
-      setState(() => _status = 'Location permission required');
-      await Geolocator.openAppSettings();
+        perm == LocationPermission.deniedForever ||
+        perm == LocationPermission.unableToDetermine) {
+      setState(() => _status = 'Location permission required · tap Mark to open Settings');
+      if (openSettingsIfBlocked) await _sensors.openAppSettings();
       return false;
     }
 
-    await _posSub?.cancel();
-    _posSub = Geolocator.getPositionStream(
-      locationSettings: highAccuracySettings(),
-    ).listen((pos) {
+    // Already streaming (e.g. Mark while the screen is live): keep it.
+    // Re-subscribing churns the platform GNSS/NMEA listeners for nothing.
+    if (_posSub != null) return true;
+
+    _posSub = _sensors.positionStream().listen((pos) {
       if (!mounted) return;
       setState(() {
         _here = pos;
@@ -86,36 +164,41 @@ class _HomeScreenState extends State<HomeScreen> {
           _status = 'Waiting for better fix · ${formatAccuracyFeet(pos.accuracy)}';
         }
       });
-    }, onError: (e) {
+    }, onError: (Object e) {
       if (!mounted) return;
       setState(() => _status = 'GPS error: $e');
     });
 
-    await _compassSub?.cancel();
-    final compass = FlutterCompass.events;
+    final compass = _sensors.headings();
     if (compass != null) {
-      _compassSub = compass.listen((event) {
-        if (!mounted) return;
-        final h = event.heading;
-        if (h == null) return;
+      _compassSub = compass.listen((h) {
+        if (!mounted || h == null) return;
         setState(() => _headingDeg = normalizeDegrees(h));
       });
     } else {
-      setState(() => _status = (_status ?? '') + ' (no compass)');
+      setState(() => _status = '${_status ?? ''} (no compass)');
     }
+
+    _ageTick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
 
     // Seed from last known only (do not treat as mark-quality).
     try {
-      final last = await Geolocator.getLastKnownPosition();
-      if (last != null && mounted) {
+      final last = await _sensors.lastKnownPosition();
+      if (last != null && !stale() && _here == null) {
         setState(() {
           _here = last;
-          _status = 'Waiting for better fix · ${formatAccuracyFeet(last.accuracy)}';
+          if (!_busy) {
+            _status = 'Waiting for better fix · ${formatAccuracyFeet(last.accuracy)}';
+          }
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Spot: last known position failed: $e');
+    }
 
-    if (mounted && _status == 'Checking location…') {
+    if (!stale() && _status == 'Checking location…') {
       setState(() => _status = 'Waiting for GPS…');
     }
     return true;
@@ -157,18 +240,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _status = 'Warming up GPS…';
     });
     try {
-      final ok = await _ensurePermissionsAndListen();
+      final ok = await _ensurePermissionsAndListen(
+        interactive: true,
+        openSettingsIfBlocked: true,
+      );
       if (!ok) return;
 
-      // Prompt high-accuracy mode if services look coarse / off-path.
-      try {
-        final serviceOn = await Geolocator.isLocationServiceEnabled();
-        if (!serviceOn) {
-          await Geolocator.openLocationSettings();
-        }
-      } catch (_) {}
-
-      final result = await collectPreciseMark(
+      final collect = widget.collectMark ?? collectPreciseMark;
+      final result = await collect(
         forceWithBest: forceAnyway,
         onProgress: (msg, latest) {
           if (!mounted) return;
@@ -195,8 +274,10 @@ class _HomeScreenState extends State<HomeScreen> {
       await _store.save(spot);
       await HapticFeedback.heavyImpact();
       if (!mounted) return;
+      final warning = result.accuracyWarning;
       setState(() {
         _spot = spot;
+        _accuracyNote = warning;
         _status = result.forced
             ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
             : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples';
@@ -311,6 +392,19 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              if (_accuracyNote != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _accuracyNote!,
+                  key: const Key('accuracyNote'),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFFFFAA33),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               Expanded(
                 child: spot == null
@@ -323,7 +417,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     : Column(
                         children: [
                           Expanded(
-                            child: Center(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
                               child: _Arrow(
                                 relativeDeg: relativeDeg,
                                 headingMissing: heading == null,

@@ -51,14 +51,20 @@ Or Archive from Xcode (Product → Archive).
 2. Or: `xcrun altool` / Transporter with the `.ipa`.
 3. App Store Connect → create app if needed (bundle `ee.sbj.spot`).
 4. TestFlight → Internal Testing → add daughter’s Apple ID → she installs **TestFlight** from the App Store → install Spot.
+   Internal testers must first be App Store Connect users on the team. Otherwise, use an External Testing group, which needs Beta App Review. TestFlight builds expire 90 days after upload.
 
 ## Privacy strings (already in Info.plist)
 
 - `NSLocationWhenInUseUsageDescription` — mark spot + arrow/distance
-- `NSLocationTemporaryUsageDescriptionDictionary` / PreciseAccuracy — precise GPS for parking
+- `NSLocationTemporaryUsageDescriptionDictionary` / `PreciseAccuracy` — precise GPS for parking. The app asks with purpose key `kPreciseAccuracyPurposeKey` (`lib/precise_mark.dart`); `test/purpose_key_test.dart` fails if the two drift apart. If the user still declines precise location, the status line says so instead of failing silently.
+- `NSLocationAlwaysAndWhenInUseUsageDescription` — required by App Store Connect (ITMS-90683) because `geolocator` links the Always APIs. The app never requests Always.
 - `NSMotionUsageDescription` — compass arrow
 
-No Always location. No background tracking in v0.
+The app asks for When In Use only and never Always. No background tracking in v0: GPS, compass and the status timer stop when the app is backgrounded. On resume they restart, and the app re-checks Location Services and permission, so returning from Settings updates the screen.
+
+## Before each upload
+
+Bump the build number in `pubspec.yaml` (`version: x.y.z+N`). App Store Connect rejects a build number that was already uploaded (0.1.1+3 is on TestFlight; this branch is 0.1.1+4).
 
 ## Min iOS
 
