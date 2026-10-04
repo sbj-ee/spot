@@ -21,6 +21,14 @@ Public repo: https://github.com/sbj-ee/spot
 - Shows live GPS **±accuracy** and **fix age**
 - Offline after mark (no map tiles, no account)
 
+## Diagnostics (0.1.2, off by default)
+
+Gear icon → **Diagnostics log**. Records every fix (accuracy, satellites
+used/visible, speed, bearing, provider), every Mark gate decision, time to
+first fix and to ±50/30/15/10/5 ft, and an A/B walk test against the saved
+spot. Export as CSV or JSON via the share sheet. Field test steps:
+[docs/diagnostics-field-test.md](docs/diagnostics-field-test.md).
+
 ## Non-goals (v0)
 
 No cloud, no multi-spot list, no turn-by-turn, no AR. iOS TestFlight packaging is in progress (see [docs/ios-testflight.md](docs/ios-testflight.md)).
