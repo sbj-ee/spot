@@ -198,11 +198,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _here = pos;
         if (_busy) return; // mark flow owns status while sampling
-        if (pos.accuracy <= kReadyAccuracyMeters) {
-          _status = 'Ready · ${formatAccuracyFeet(pos.accuracy)}';
-        } else {
-          _status = 'Waiting for better fix · ${formatAccuracyFeet(pos.accuracy)}';
-        }
+        _status = liveFixStatus(pos.accuracy);
       });
     }, onError: (Object e) {
       if (!mounted) return;
@@ -230,7 +226,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() {
           _here = last;
           if (!_busy) {
-            _status = 'Waiting for better fix · ${formatAccuracyFeet(last.accuracy)}';
+            _status = liveFixStatus(last.accuracy);
           }
         });
       }
@@ -334,7 +330,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _spot = spot;
         _accuracyNote = warning;
         _status = result.forced
-            ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
+            ? 'Marked (provisional · ${formatAccuracyFeet(result.accuracyMeters)} · '
+                '${result.sampleCount} ${result.sampleCount == 1 ? 'sample' : 'samples'})'
             : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples';
       });
     } catch (e) {
@@ -583,6 +580,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// Live status line for the current fix: Ready at the mark target,
+/// Converging while fixes are usable for the weighted average, else Waiting.
+String liveFixStatus(double accuracyMeters) {
+  final acc = formatAccuracyFeet(accuracyMeters);
+  if (accuracyMeters <= kReadyAccuracyMeters) return 'Ready · $acc';
+  if (accuracyMeters <= kAcceptAccuracyMeters) return 'Converging · $acc';
+  return 'Waiting for better fix · $acc';
 }
 
 class _BigButton extends StatelessWidget {

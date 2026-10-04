@@ -160,7 +160,7 @@ void main() {
     );
   });
 
-  test('gate decisions are reported, baseline gate unchanged', () async {
+  test('gate decisions are reported (weighted gate)', () async {
     final c = StreamController<Position>();
     final events = <String>[];
     final f = collectPreciseMark(
@@ -172,20 +172,22 @@ void main() {
       warmup: Duration.zero,
       timeout: const Duration(milliseconds: 300),
     );
-    c.add(_ap(9)); // > 8 m accept limit
-    c.add(_ap(6)); // usable but > 5 m: never averaged (baseline behaviour)
+    c.add(_ap(20)); // > 15 m accept limit
+    c.add(_ap(9)); // now counts, with low weight
+    c.add(_ap(6));
     c.add(_ap(4));
     c.add(_ap(4, northM: 80)); // jump
     final r = await f;
     expect(events, [
       'rejected_unusable',
-      'ignored_above_ready',
+      'accepted',
+      'accepted',
       'accepted',
       'rejected_jump',
-      'timeout_best_single',
+      'timeout_provisional_average',
     ]);
     expect(r!.forced, isTrue);
-    expect(r.sampleCount, 1);
+    expect(r.sampleCount, 3);
     await c.close();
   });
 
