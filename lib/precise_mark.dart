@@ -4,12 +4,17 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'diagnostics.dart';
+
 /// High-accuracy mark settings. Prefer GNSS over coarse network fixes.
+/// Whether the Android request bypasses Play services (see diagnostics).
+const bool kForceLocationManager = true;
+
 LocationSettings highAccuracySettings({Duration? interval}) {
   return AndroidSettings(
     accuracy: LocationAccuracy.bestForNavigation,
     distanceFilter: 0,
-    forceLocationManager: true,
+    forceLocationManager: kForceLocationManager,
     intervalDuration: interval ?? const Duration(milliseconds: 500),
     // Foreground notification not required for short mark sessions.
   );
@@ -192,8 +197,12 @@ Future<PreciseMarkResult?> collectPreciseMark({
   required void Function(String status, Position? latest) onProgress,
   Duration timeout = kMarkTimeout,
   bool forceWithBest = false,
+  GateObserver? onGate,
+  @visibleForTesting Stream<Position>? positions,
+  @visibleForTesting Future<PreciseAccuracyCheck> Function()? checkAccuracy,
+  @visibleForTesting Duration warmup = kWarmupIgnore,
 }) async {
-  final accuracyCheck = await ensurePreciseAccuracy();
+  final accuracyCheck = await (checkAccuracy ?? ensurePreciseAccuracy)();
   final accuracyWarning = accuracyCheck.message;
   if (accuracyWarning != null) {
     onProgress(accuracyWarning, null);
@@ -203,13 +212,24 @@ Future<PreciseMarkResult?> collectPreciseMark({
   final good = <Position>[];
   Position? best; // lowest accuracy value among all seen
 
-  final stream = Geolocator.getPositionStream(
-    locationSettings: highAccuracySettings(),
-  );
+  final stream = positions ??
+      Geolocator.getPositionStream(locationSettings: highAccuracySettings());
 
   final completer = Completer<PreciseMarkResult?>();
   late StreamSubscription<Position> sub;
   Timer? timeoutTimer;
+
+  // Diagnostics only: report each decision without changing it.
+  GateWindow window() {
+    double? mean;
+    if (good.isNotEmpty) {
+      mean = good.map((p) => p.accuracy).reduce((a, b) => a + b) / good.length;
+    }
+    return GateWindow(count: good.length, meanAccM: mean, bestAccM: best?.accuracy);
+  }
+
+  void gate(String event, Position pos, String reason) =>
+      onGate?.call(event, pos, reason, window());
 
   void finish(PreciseMarkResult? result) {
     if (completer.isCompleted) return;
@@ -219,6 +239,14 @@ Future<PreciseMarkResult?> collectPreciseMark({
   }
 
   timeoutTimer = Timer(timeout, () {
+    final b = best;
+    if (b != null) {
+      gate(
+        good.length >= 2 ? 'timeout_average' : 'timeout_best_single',
+        b,
+        'timeout ${timeout.inSeconds}s with ${good.length} good samples',
+      );
+    }
     if (good.length >= 2) {
       finish(averageSamples(good, forced: true));
     } else if (best != null && forceWithBest) {
@@ -237,7 +265,8 @@ Future<PreciseMarkResult?> collectPreciseMark({
     }
 
     // Warm-up: ignore first seconds (often a cached/network jump).
-    if (elapsed < kWarmupIgnore) {
+    if (elapsed < warmup) {
+      gate('rejected_warmup', pos, 'within first ${warmup.inSeconds}s of mark');
       onProgress(
         'Warming up GPS… ${formatAcc(pos.accuracy)}',
         pos,
@@ -248,6 +277,8 @@ Future<PreciseMarkResult?> collectPreciseMark({
     onProgress('Sampling… ${formatAcc(pos.accuracy)}', pos);
 
     if (!isFixUsable(pos, maxAccuracyMeters: kAcceptAccuracyMeters)) {
+      gate('rejected_unusable', pos,
+          'accuracy ${pos.accuracy.toStringAsFixed(1)} m > $kAcceptAccuracyMeters m or invalid');
       return;
     }
     // Reject huge jumps from current mean if we have samples.
@@ -260,16 +291,23 @@ Future<PreciseMarkResult?> collectPreciseMark({
         pos.longitude,
       );
       if (jump > math.max(25.0, pos.accuracy * 3)) {
+        gate('rejected_jump', pos,
+            'jump ${jump.toStringAsFixed(1)} m from mean > ${math.max(25.0, pos.accuracy * 3).toStringAsFixed(1)} m');
         return;
       }
     }
 
     if (pos.accuracy <= kReadyAccuracyMeters) {
       good.add(pos);
+      gate('accepted', pos, 'accuracy ${pos.accuracy.toStringAsFixed(1)} m <= $kReadyAccuracyMeters m');
+    } else {
+      gate('ignored_above_ready', pos,
+          'accuracy ${pos.accuracy.toStringAsFixed(1)} m > $kReadyAccuracyMeters m (usable but not averaged)');
     }
 
     if (good.length >= kMinGoodSamples) {
       onProgress('Locked ${good.length} samples', pos);
+      gate('locked', pos, '${good.length} samples <= $kReadyAccuracyMeters m');
       finish(averageSamples(good, forced: false));
     }
   }, onError: (e) {

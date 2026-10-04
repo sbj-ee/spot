@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'diag_platform.dart';
+import 'diagnostics.dart';
+import 'diagnostics_screen.dart';
 import 'geo_math.dart';
 import 'precise_mark.dart';
 import 'sensors.dart';
+import 'settings_screen.dart';
 import 'spot_store.dart';
 
 typedef PreciseMarkCollector = Future<PreciseMarkResult?> Function({
@@ -20,6 +24,7 @@ class HomeScreen extends StatefulWidget {
     this.sensors = const DeviceSensors(),
     this.store,
     this.collectMark,
+    this.diagnostics,
   });
 
   final SpotSensors sensors;
@@ -27,6 +32,9 @@ class HomeScreen extends StatefulWidget {
 
   /// Override for tests; defaults to [collectPreciseMark].
   final PreciseMarkCollector? collectMark;
+
+  /// Diagnostics log; defaults to [DiagnosticsLog.instance].
+  final DiagnosticsLog? diagnostics;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -57,16 +65,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _sensorGeneration = 0;
 
   SpotSensors get _sensors => widget.sensors;
+  late final DiagnosticsLog _diag = widget.diagnostics ?? DiagnosticsLog.instance;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _diag.addListener(_onDiagChanged);
     _bootstrap();
+  }
+
+  bool _diagWasEnabled = false;
+  void _onDiagChanged() {
+    if (!mounted || _diag.enabled == _diagWasEnabled) return;
+    setState(() => _diagWasEnabled = _diag.enabled);
+  }
+
+  Future<void> _initDiagnostics() async {
+    try {
+      await _diag.loadEnabled();
+      final info = await DiagPlatform.deviceInfo();
+      _diag.deviceInfo = info;
+      _diag.provider = DiagPlatform.effectiveProvider(
+        forceLocationManager: kForceLocationManager,
+        info: info,
+      );
+      if (_diag.enabled) {
+        await DiagPlatform.keepScreenOn(true);
+        _diag.note('app_start', 'diagnostics on · provider ${_diag.provider}');
+      }
+    } catch (e) {
+      debugPrint('Spot: diagnostics init failed: $e');
+    }
   }
 
   @override
   void dispose() {
+    _diag.removeListener(_onDiagChanged);
     WidgetsBinding.instance.removeObserver(this);
     _stopSensors();
     super.dispose();
@@ -111,6 +146,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final spot = await _store.load();
     if (!mounted) return;
     setState(() => _spot = spot);
+    _diag.setSpot(spot?.latitude, spot?.longitude);
+    // Not awaited: diagnostics must never delay GPS start.
+    unawaited(_initDiagnostics());
     await _ensurePermissionsAndListen(interactive: true);
   }
 
@@ -153,8 +191,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // Re-subscribing churns the platform GNSS/NMEA listeners for nothing.
     if (_posSub != null) return true;
 
+    _diag.startSession('gps stream start');
     _posSub = _sensors.positionStream().listen((pos) {
       if (!mounted) return;
+      _diag.recordFix(pos);
       setState(() {
         _here = pos;
         if (_busy) return; // mark flow owns status while sampling
@@ -246,16 +286,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
       if (!ok) return;
 
-      final collect = widget.collectMark ?? collectPreciseMark;
-      final result = await collect(
-        forceWithBest: forceAnyway,
-        onProgress: (msg, latest) {
-          if (!mounted) return;
-          setState(() {
-            _status = msg;
-            if (latest != null) _here = latest;
-          });
-        },
+      void onProgress(String msg, Position? latest) {
+        if (!mounted) return;
+        setState(() {
+          _status = msg;
+          if (latest != null) _here = latest;
+        });
+      }
+
+      _diag.note('mark_start', forceAnyway ? 'mark anyway' : 'mark',
+          accuracyM: _here?.accuracy);
+      final custom = widget.collectMark;
+      final result = custom != null
+          ? await custom(forceWithBest: forceAnyway, onProgress: onProgress)
+          : await collectPreciseMark(
+              forceWithBest: forceAnyway,
+              onProgress: onProgress,
+              onGate: _diag.recordGate,
+            );
+      _diag.note(
+        result == null ? 'mark_failed' : (result.forced ? 'mark_forced' : 'mark_locked'),
+        result == null ? 'no usable samples' : '${result.sampleCount} samples',
+        lat: result?.latitude,
+        lon: result?.longitude,
+        accuracyM: result?.accuracyMeters,
       );
 
       if (result == null) {
@@ -272,6 +326,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         altitudeMeters: result.altitudeMeters,
       );
       await _store.save(spot);
+      _diag.setSpot(spot.latitude, spot.longitude);
       await HapticFeedback.heavyImpact();
       if (!mounted) return;
       final warning = result.accuracyWarning;
@@ -292,6 +347,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _clearSpot() async {
     await _store.clear();
+    _diag.setSpot(null, null);
     await HapticFeedback.selectionClick();
     if (!mounted) return;
     setState(() => _spot = null);
@@ -367,15 +423,52 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'SPOT',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Color(0xFFFFCC00),
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 4,
-                ),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 96,
+                    child: _diag.enabled
+                        ? TextButton(
+                            key: const Key('openDiagnostics'),
+                            onPressed: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => DiagnosticsScreen(log: _diag),
+                              ),
+                            ),
+                            child: const Text('DIAG',
+                                style: TextStyle(color: Color(0xFFFFAA33), fontWeight: FontWeight.w800)),
+                          )
+                        : null,
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'SPOT',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0xFFFFCC00),
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 4,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 96,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        key: const Key('openSettings'),
+                        tooltip: 'Settings',
+                        icon: const Icon(Icons.settings, color: Colors.white54),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => SettingsScreen(diagnostics: _diag),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               Text(
