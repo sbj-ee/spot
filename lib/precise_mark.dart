@@ -6,23 +6,43 @@ import 'package:geolocator/geolocator.dart';
 
 import 'diagnostics.dart';
 
-/// High-accuracy mark settings. Prefer GNSS over coarse network fixes.
+/// High-accuracy location settings for the live screen and for marking.
+///
+/// Android: goes through Google Play services' FusedLocationProviderClient
+/// with PRIORITY_HIGH_ACCURACY (geolocator maps high/best/bestForNavigation
+/// to that priority), a 1 s interval and no distance filter.
+///
+/// Do not set forceLocationManager: on Android 12+ geolocator's
+/// LocationManager path picks LocationManager.FUSED_PROVIDER ahead of
+/// GPS_PROVIDER, so it never gave GNSS-only fixes; it only bypassed the Play
+/// services fused provider. bestForNavigation is kept for iOS
+/// (kCLLocationAccuracyBestForNavigation); on Android it equals best/high.
 /// Whether the Android request bypasses Play services (see diagnostics).
-const bool kForceLocationManager = true;
+const bool kForceLocationManager = false;
 
 LocationSettings highAccuracySettings({Duration? interval}) {
   return AndroidSettings(
     accuracy: LocationAccuracy.bestForNavigation,
     distanceFilter: 0,
     forceLocationManager: kForceLocationManager,
-    intervalDuration: interval ?? const Duration(milliseconds: 500),
+    intervalDuration: interval ?? const Duration(seconds: 1),
     // Foreground notification not required for short mark sessions.
   );
 }
 
-const double kReadyAccuracyMeters = 5.0; // ~16 ft — Mark enabled at/under this
-const double kAcceptAccuracyMeters = 8.0; // drop worse samples while averaging
+/// Mark locks when the accuracy-weighted estimate over the window is at or
+/// under this (~16 ft). Also the live "Ready" threshold.
+const double kReadyAccuracyMeters = 5.0;
+
+/// Samples worse than this (~49 ft) are dropped. Anything better counts,
+/// weighted by 1/accuracy², so a 10 m fix barely moves a 4 m cluster.
+const double kAcceptAccuracyMeters = 15.0;
+
+/// Minimum samples in the window before Mark can lock.
 const int kMinGoodSamples = 5;
+
+/// Sliding window of the most recent accepted samples.
+const int kSampleWindow = 10;
 const Duration kMarkTimeout = Duration(seconds: 25);
 const Duration kWarmupIgnore = Duration(seconds: 2); // discard first fixes
 
@@ -140,59 +160,163 @@ class PreciseMarkResult {
 
 bool isFixUsable(Position p, {required double maxAccuracyMeters}) {
   if (!p.latitude.isFinite || !p.longitude.isFinite) return false;
+  if (!p.accuracy.isFinite) return false;
   if (p.accuracy <= 0 || p.accuracy > maxAccuracyMeters) return false;
   // Reject absurd coordinates
   if (p.latitude.abs() > 90 || p.longitude.abs() > 180) return false;
   return true;
 }
 
-/// Average lat/lon of [samples], report accuracy as max(sample accuracies,
-/// 1σ radius of the cloud) so a tight cluster with claimed 3 m each still
-/// reflects scatter.
+/// Accuracy-weighted average of [samples] (weight 1/accuracy²).
+///
+/// Reported accuracy is max(weighted RMS of the claimed accuracies, weighted
+/// 1σ scatter of the cloud). It deliberately does not shrink by √N: GNSS
+/// errors are strongly correlated over a few seconds, so averaging a
+/// stationary phone does not make the fix N times better.
 PreciseMarkResult averageSamples(List<Position> samples, {required bool forced}) {
   assert(samples.isNotEmpty);
+  var sumW = 0.0;
   var sumLat = 0.0;
   var sumLon = 0.0;
-  var sumAlt = 0.0;
-  var altN = 0;
-  var worstAcc = 0.0;
+  var sumAltW = 0.0;
+  var altW = 0.0;
   for (final p in samples) {
-    sumLat += p.latitude;
-    sumLon += p.longitude;
-    worstAcc = math.max(worstAcc, p.accuracy);
+    final acc = math.max(p.accuracy, 0.1);
+    final w = 1.0 / (acc * acc);
+    sumW += w;
+    sumLat += w * p.latitude;
+    sumLon += w * p.longitude;
     if (p.altitude.isFinite) {
-      sumAlt += p.altitude;
-      altN++;
+      sumAltW += w * p.altitude;
+      altW += w;
     }
   }
   final n = samples.length;
-  final meanLat = sumLat / n;
-  final meanLon = sumLon / n;
+  final meanLat = sumLat / sumW;
+  final meanLon = sumLon / sumW;
+  // Weighted RMS of accuracies: sqrt(n / Σ 1/acc²). Equals acc when all agree.
+  final claimed = math.sqrt(n / sumW);
 
   // Rough meters-per-degree at this latitude for scatter estimate.
-  final mPerDegLat = 111320.0;
+  const mPerDegLat = 111320.0;
   final mPerDegLon = 111320.0 * math.cos(meanLat * math.pi / 180.0).abs().clamp(0.2, 1.0);
   var sumSq = 0.0;
   for (final p in samples) {
+    final acc = math.max(p.accuracy, 0.1);
+    final w = 1.0 / (acc * acc);
     final dy = (p.latitude - meanLat) * mPerDegLat;
     final dx = (p.longitude - meanLon) * mPerDegLon;
-    sumSq += dx * dx + dy * dy;
+    sumSq += w * (dx * dx + dy * dy);
   }
-  final sigma = math.sqrt(sumSq / n);
-  final accuracy = math.max(worstAcc, sigma);
+  final sigma = math.sqrt(sumSq / sumW);
+  final accuracy = math.max(claimed, sigma);
 
   return PreciseMarkResult(
     latitude: meanLat,
     longitude: meanLon,
     accuracyMeters: accuracy,
     sampleCount: n,
-    altitudeMeters: altN > 0 ? sumAlt / altN : null,
+    altitudeMeters: altW > 0 ? sumAltW / altW : null,
     forced: forced,
   );
 }
 
-/// Collect GNSS samples until [kMinGoodSamples] at ≤ [kReadyAccuracyMeters],
-/// or [timeout]. Returns null if nothing usable (caller may force with stream).
+enum SampleVerdict { accepted, tooInaccurate, jump }
+
+/// Pure (no plugins, no timers) sample bookkeeping for a mark, so the gate
+/// can be unit tested.
+///
+/// Every usable fix (≤ [acceptMeters]) goes into a sliding window of the last
+/// [window] samples. The mark has [converged] once the window holds at least
+/// [minSamples] and its weighted estimate is ≤ [targetMeters]. Before, each
+/// sample had to be ≤ 5 m on its own and the 8 m accept limit was never
+/// used, so a phone hovering at 5–10 m outdoors never locked.
+class MarkSampler {
+  MarkSampler({
+    this.acceptMeters = kAcceptAccuracyMeters,
+    this.targetMeters = kReadyAccuracyMeters,
+    this.minSamples = kMinGoodSamples,
+    this.window = kSampleWindow,
+  });
+
+  final double acceptMeters;
+  final double targetMeters;
+  final int minSamples;
+  final int window;
+
+  final List<Position> _samples = [];
+  Position? _best;
+
+  /// Accepted samples currently in the window (oldest first).
+  List<Position> get samples => List.unmodifiable(_samples);
+
+  /// Lowest-accuracy fix seen, usable or not.
+  Position? get best => _best;
+
+  /// Weighted estimate over the window, or null when empty.
+  PreciseMarkResult? estimate({bool forced = false}) =>
+      _samples.isEmpty ? null : averageSamples(_samples, forced: forced);
+
+  bool get converged {
+    if (_samples.length < minSamples) return false;
+    return estimate()!.accuracyMeters <= targetMeters;
+  }
+
+  /// Track [p] as a best-fix candidate without adding it to the window
+  /// (used during warm-up).
+  void observe(Position p) {
+    if (p.accuracy.isFinite &&
+        p.accuracy > 0 &&
+        (_best == null || p.accuracy < _best!.accuracy)) {
+      _best = p;
+    }
+  }
+
+  SampleVerdict add(Position p) {
+    observe(p);
+    if (!isFixUsable(p, maxAccuracyMeters: acceptMeters)) {
+      return SampleVerdict.tooInaccurate;
+    }
+    final mean = estimate();
+    if (mean != null) {
+      final jump = Geolocator.distanceBetween(
+        mean.latitude,
+        mean.longitude,
+        p.latitude,
+        p.longitude,
+      );
+      if (jump > math.max(25.0, p.accuracy * 3)) return SampleVerdict.jump;
+    }
+    _samples.add(p);
+    if (_samples.length > window) _samples.removeAt(0);
+    return SampleVerdict.accepted;
+  }
+
+  /// Best available result when time runs out: the weighted window if it has
+  /// anything, else the single best fix seen. Always marked forced
+  /// (provisional). Null when nothing at all arrived.
+  PreciseMarkResult? provisional() {
+    final est = estimate(forced: true);
+    if (est != null) return est;
+    final b = _best;
+    if (b == null || !b.latitude.isFinite || !b.longitude.isFinite) return null;
+    return averageSamples([b], forced: true);
+  }
+
+  /// Live progress line while converging.
+  String progressLabel(Position latest) {
+    final est = estimate();
+    final buf = StringBuffer(
+      'Sampling ${_samples.length}/$minSamples · now ${formatAcc(latest.accuracy)}',
+    );
+    if (est != null) buf.write(' · avg ${formatAcc(est.accuracyMeters)}');
+    return buf.toString();
+  }
+}
+
+/// Collect samples until the weighted window converges to
+/// [kReadyAccuracyMeters], or [timeout]. On timeout returns the best
+/// estimate so far as provisional (forced), or null if no fix arrived.
 Future<PreciseMarkResult?> collectPreciseMark({
   required void Function(String status, Position? latest) onProgress,
   Duration timeout = kMarkTimeout,
@@ -209,8 +333,7 @@ Future<PreciseMarkResult?> collectPreciseMark({
   }
 
   final started = DateTime.now();
-  final good = <Position>[];
-  Position? best; // lowest accuracy value among all seen
+  final sampler = MarkSampler();
 
   final stream = positions ??
       Geolocator.getPositionStream(locationSettings: highAccuracySettings());
@@ -219,18 +342,6 @@ Future<PreciseMarkResult?> collectPreciseMark({
   late StreamSubscription<Position> sub;
   Timer? timeoutTimer;
 
-  // Diagnostics only: report each decision without changing it.
-  GateWindow window() {
-    double? mean;
-    if (good.isNotEmpty) {
-      mean = good.map((p) => p.accuracy).reduce((a, b) => a + b) / good.length;
-    }
-    return GateWindow(count: good.length, meanAccM: mean, bestAccM: best?.accuracy);
-  }
-
-  void gate(String event, Position pos, String reason) =>
-      onGate?.call(event, pos, reason, window());
-
   void finish(PreciseMarkResult? result) {
     if (completer.isCompleted) return;
     timeoutTimer?.cancel();
@@ -238,85 +349,60 @@ Future<PreciseMarkResult?> collectPreciseMark({
     completer.complete(result?.withAccuracyWarning(accuracyWarning));
   }
 
+  // Diagnostics only: report each decision without changing it.
+  GateWindow window() => GateWindow(
+    count: sampler.samples.length,
+    meanAccM: sampler.estimate()?.accuracyMeters,
+    bestAccM: sampler.best?.accuracy,
+  );
+  void gate(String event, Position pos, String reason) =>
+      onGate?.call(event, pos, reason, window());
+
   timeoutTimer = Timer(timeout, () {
-    final b = best;
+    final b = sampler.best;
     if (b != null) {
       gate(
-        good.length >= 2 ? 'timeout_average' : 'timeout_best_single',
+        sampler.samples.isNotEmpty ? 'timeout_provisional_average' : 'timeout_best_single',
         b,
-        'timeout ${timeout.inSeconds}s with ${good.length} good samples',
+        'timeout ${timeout.inSeconds}s with ${sampler.samples.length} samples',
       );
     }
-    if (good.length >= 2) {
-      finish(averageSamples(good, forced: true));
-    } else if (best != null && forceWithBest) {
-      finish(averageSamples([best!], forced: true));
-    } else if (best != null) {
-      finish(averageSamples([best!], forced: true));
-    } else {
-      finish(null);
-    }
+    finish(sampler.provisional());
   });
 
   sub = stream.listen((pos) {
     final elapsed = DateTime.now().difference(started);
-    if (best == null || pos.accuracy < best!.accuracy) {
-      best = pos;
-    }
 
-    // Warm-up: ignore first seconds (often a cached/network jump).
+    // Warm-up: ignore first seconds (often a cached/network jump), but keep
+    // the best one in case nothing better ever arrives.
     if (elapsed < warmup) {
+      sampler.observe(pos);
       gate('rejected_warmup', pos, 'within first ${warmup.inSeconds}s of mark');
-      onProgress(
-        'Warming up GPS… ${formatAcc(pos.accuracy)}',
-        pos,
-      );
+      onProgress('Warming up GPS… ${formatAcc(pos.accuracy)}', pos);
       return;
     }
 
-    onProgress('Sampling… ${formatAcc(pos.accuracy)}', pos);
+    final verdict = sampler.add(pos);
+    final acc = pos.accuracy.toStringAsFixed(1);
+    switch (verdict) {
+      case SampleVerdict.accepted:
+        gate('accepted', pos, 'accuracy $acc m <= $kAcceptAccuracyMeters m, weight 1/acc²');
+      case SampleVerdict.tooInaccurate:
+        gate('rejected_unusable', pos, 'accuracy $acc m > $kAcceptAccuracyMeters m or invalid');
+      case SampleVerdict.jump:
+        gate('rejected_jump', pos, 'too far from current weighted estimate');
+    }
+    onProgress(sampler.progressLabel(pos), pos);
 
-    if (!isFixUsable(pos, maxAccuracyMeters: kAcceptAccuracyMeters)) {
-      gate('rejected_unusable', pos,
-          'accuracy ${pos.accuracy.toStringAsFixed(1)} m > $kAcceptAccuracyMeters m or invalid');
-      return;
+    if (sampler.converged) {
+      onProgress('Locked ${sampler.samples.length} samples', pos);
+      gate('locked', pos,
+          'weighted estimate ${sampler.estimate()!.accuracyMeters.toStringAsFixed(1)} m <= $kReadyAccuracyMeters m');
+      finish(sampler.estimate());
     }
-    // Reject huge jumps from current mean if we have samples.
-    if (good.isNotEmpty) {
-      final mean = averageSamples(good, forced: false);
-      final jump = Geolocator.distanceBetween(
-        mean.latitude,
-        mean.longitude,
-        pos.latitude,
-        pos.longitude,
-      );
-      if (jump > math.max(25.0, pos.accuracy * 3)) {
-        gate('rejected_jump', pos,
-            'jump ${jump.toStringAsFixed(1)} m from mean > ${math.max(25.0, pos.accuracy * 3).toStringAsFixed(1)} m');
-        return;
-      }
-    }
-
-    if (pos.accuracy <= kReadyAccuracyMeters) {
-      good.add(pos);
-      gate('accepted', pos, 'accuracy ${pos.accuracy.toStringAsFixed(1)} m <= $kReadyAccuracyMeters m');
-    } else {
-      gate('ignored_above_ready', pos,
-          'accuracy ${pos.accuracy.toStringAsFixed(1)} m > $kReadyAccuracyMeters m (usable but not averaged)');
-    }
-
-    if (good.length >= kMinGoodSamples) {
-      onProgress('Locked ${good.length} samples', pos);
-      gate('locked', pos, '${good.length} samples <= $kReadyAccuracyMeters m');
-      finish(averageSamples(good, forced: false));
-    }
-  }, onError: (e) {
+  }, onError: (Object e) {
     onProgress('GPS error: $e', null);
-    if (good.isNotEmpty) {
-      finish(averageSamples(good, forced: true));
-    } else {
-      finish(null);
-    }
+    finish(sampler.provisional());
   });
 
   return completer.future;

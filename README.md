@@ -7,13 +7,16 @@ Android-first MVP for a Google Pixel 9 (Flutter). Product notes:
 
 Public repo: https://github.com/sbj-ee/spot
 
-## What v0.1.1 does
+## What v0.1.3 does
 
 - Single high-contrast screen
 - **Mark Spot** — high-accuracy GNSS mark (not the first cached fix):
-  - `LocationAccuracy.bestForNavigation` + Android LocationManager (`forceLocationManager`)
-  - ~2s GPS warm-up, then average ≥5 samples with horizontal accuracy ≤ ~5 m (~16 ft)
-  - Live **Ready / Waiting for better fix** with ±ft; Mark prompts **Mark anyway** if still weak
+  - Android: Play services fused provider, `PRIORITY_HIGH_ACCURACY`, 1 s updates, no distance filter
+  - ~2s GPS warm-up, then an accuracy-weighted (1/σ²) average over the last 10 fixes ≤ ~15 m;
+    locks when ≥5 samples and the weighted estimate is ≤ ~5 m (~16 ft)
+  - While sampling shows live and averaged ±ft (`Sampling 3/5 · now ±20 ft · avg ±14 ft`)
+  - After 25 s without a lock, saves the best estimate so far as **provisional**
+  - Live **Ready / Converging / Waiting for better fix** with ±ft; Mark prompts **Mark anyway** if still weak
   - Discards coarse / jump outliers while sampling
 - Live arrow = device compass heading vs bearing-to-spot
 - Distance in **feet** under ~0.5 mi, else **miles**
@@ -21,7 +24,7 @@ Public repo: https://github.com/sbj-ee/spot
 - Shows live GPS **±accuracy** and **fix age**
 - Offline after mark (no map tiles, no account)
 
-## Diagnostics (0.1.2, off by default)
+## Diagnostics (since 0.1.2, off by default)
 
 Gear icon → **Diagnostics log**. Records every fix (accuracy, satellites
 used/visible, speed, bearing, provider), every Mark gate decision, time to

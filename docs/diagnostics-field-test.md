@@ -65,5 +65,12 @@ times, and A/B phase changes with distance from the saved spot. The JSON
 also has phone model, Android version and GNSS chip info.
 
 Note: Android does not tell the app which provider produced each fix. The
-"provider" column is the provider this build requests (on Android 12+ with
-`forceLocationManager` that is LocationManager's `fused` provider).
+"provider" column is the provider the build requests: 0.1.2 uses
+LocationManager's `fused` provider (`forceLocationManager`), 0.1.3 uses
+Google Play services' FusedLocationProviderClient.
+
+## Comparing 0.1.2 and 0.1.3
+
+Run the same test on 0.1.2 (baseline) and then on 0.1.3 (the fix), from
+the same spot A, back to back if you can. 0.1.3 installs over 0.1.2 the
+same way and keeps the diagnostics setting.
