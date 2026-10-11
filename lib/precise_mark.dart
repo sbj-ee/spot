@@ -229,32 +229,42 @@ List<Position> withoutOutliers(List<Position> samples) {
 /// On timeout a single best fix is only accepted when it is within
 /// [kAcceptAccuracyMeters], unless [forceWithBest] (the user chose "Mark
 /// anyway"), which takes whatever sane fix was best. Returns null otherwise.
+///
+/// [positions], [checkAccuracy] and [warmup] default to the device GNSS
+/// stream, [ensurePreciseAccuracy] and [kWarmupIgnore]; tests pass their own.
 Future<PreciseMarkResult?> collectPreciseMark({
   required void Function(String status, Position? latest) onProgress,
   Duration? timeout,
   bool forceWithBest = false,
+  Stream<Position>? positions,
+  Future<PreciseAccuracyCheck> Function()? checkAccuracy,
+  Duration warmup = kWarmupIgnore,
 }) async {
-  final accuracyCheck = await ensurePreciseAccuracy();
+  final accuracyCheck = await (checkAccuracy ?? ensurePreciseAccuracy)();
   final accuracyWarning = accuracyCheck.message;
   if (accuracyWarning != null) {
     onProgress(accuracyWarning, null);
   }
 
-  final started = DateTime.now();
   final good = <Position>[];
   Position? best; // lowest accuracy value among sane post-warm-up fixes
 
-  final stream = Geolocator.getPositionStream(
-    locationSettings: highAccuracySettings(),
-  );
+  final stream =
+      positions ??
+      Geolocator.getPositionStream(locationSettings: highAccuracySettings());
 
   final completer = Completer<PreciseMarkResult?>();
   late StreamSubscription<Position> sub;
   Timer? timeoutTimer;
 
+  // Warm-up: ignore the first fixes (often a cached/network jump).
+  var warm = warmup <= Duration.zero;
+  final warmupTimer = warm ? null : Timer(warmup, () => warm = true);
+
   void finish(PreciseMarkResult? result) {
     if (completer.isCompleted) return;
     timeoutTimer?.cancel();
+    warmupTimer?.cancel();
     sub.cancel();
     completer.complete(result?.withAccuracyWarning(accuracyWarning));
   }
@@ -274,10 +284,7 @@ Future<PreciseMarkResult?> collectPreciseMark({
   });
 
   sub = stream.listen((pos) {
-    final elapsed = DateTime.now().difference(started);
-
-    // Warm-up: ignore first seconds (often a cached/network jump).
-    if (elapsed < kWarmupIgnore) {
+    if (!warm) {
       onProgress(
         'Warming up GPS… ${formatAccuracyFeet(pos.accuracy)}',
         pos,

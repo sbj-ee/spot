@@ -57,6 +57,39 @@ void main() {
     expect(hint(170, 180, 2), 'Spot is ~35 ft below you (rough)');
   });
 
+  test('distance switches from feet to miles at half a mile', () {
+    expect(formatDistance(0), '0.0 ft');
+    expect(formatDistance(800), '2625 ft');
+    expect(formatDistance(805), '0.50 mi');
+    expect(formatDistance(20000), '12.4 mi');
+  });
+
+  test('accuracy formatting', () {
+    expect(formatAccuracyFeet(null), '±? ft');
+    expect(formatAccuracyFeet(double.nan), '±? ft');
+    expect(formatAccuracyFeet(2), '±6.6 ft');
+    expect(formatAccuracyFeet(5), '±16 ft');
+  });
+
+  test('fix age buckets', () {
+    final now = DateTime.now();
+    expect(formatFixAge(null), 'age unknown');
+    expect(formatFixAge(now), 'just now');
+    expect(formatFixAge(now.subtract(const Duration(seconds: 30))), '30s ago');
+    expect(formatFixAge(now.subtract(const Duration(minutes: 5))), '5m ago');
+  });
+
+  test('normalize degrees and cardinals', () {
+    expect(normalizeDegrees(-90), 270);
+    expect(normalizeDegrees(720), 0);
+    expect(bearingCardinal(0), 'N');
+    expect(bearingCardinal(-1), 'N');
+    expect(bearingCardinal(44), 'NE');
+    expect(bearingCardinal(180), 'S');
+    expect(bearingCardinal(300), 'NW');
+    expect(shortestAngleDelta(10, 350), closeTo(-20, 0.01));
+  });
+
   test('shortest angle', () {
     expect(shortestAngleDelta(10, 30), closeTo(20, 0.01));
     expect(shortestAngleDelta(350, 10), closeTo(20, 0.01));
