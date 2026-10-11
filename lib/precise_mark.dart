@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'geo_math.dart';
+
 /// High-accuracy mark settings. Prefer GNSS over coarse network fixes.
 LocationSettings highAccuracySettings({Duration? interval}) {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
@@ -198,6 +200,28 @@ PreciseMarkResult averageSamples(List<Position> samples, {required bool forced})
   );
 }
 
+double _median(Iterable<double> values) {
+  final sorted = values.toList()..sort();
+  final mid = sorted.length ~/ 2;
+  return sorted.length.isOdd ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/// Drops samples that sit far from the median position (a multipath jump
+/// or a leftover cached fix). The median, unlike a running mean, is not
+/// dragged off by a bad first sample. Fewer than 3 samples can't outvote
+/// each other, so they are returned as they are.
+List<Position> withoutOutliers(List<Position> samples) {
+  if (samples.length < 3) return samples;
+  final lat = _median(samples.map((p) => p.latitude));
+  final lon = _median(samples.map((p) => p.longitude));
+  return [
+    for (final p in samples)
+      if (Geolocator.distanceBetween(lat, lon, p.latitude, p.longitude) <=
+          math.max(25.0, p.accuracy * 3))
+        p,
+  ];
+}
+
 /// Collect GNSS samples until [kMinGoodSamples] at ≤ [kReadyAccuracyMeters],
 /// or [timeout] ([kMarkTimeout], or the shorter [kForcedMarkTimeout] when
 /// [forceWithBest]).
@@ -238,8 +262,9 @@ Future<PreciseMarkResult?> collectPreciseMark({
   final limit = timeout ?? (forceWithBest ? kForcedMarkTimeout : kMarkTimeout);
   timeoutTimer = Timer(limit, () {
     final fallback = best;
-    if (good.length >= 2) {
-      finish(averageSamples(good, forced: true));
+    final kept = withoutOutliers(good);
+    if (kept.length >= 2) {
+      finish(averageSamples(kept, forced: true));
     } else if (fallback != null &&
         (forceWithBest || fallback.accuracy <= kAcceptAccuracyMeters)) {
       finish(averageSamples([fallback], forced: true));
@@ -254,13 +279,13 @@ Future<PreciseMarkResult?> collectPreciseMark({
     // Warm-up: ignore first seconds (often a cached/network jump).
     if (elapsed < kWarmupIgnore) {
       onProgress(
-        'Warming up GPS… ${formatAcc(pos.accuracy)}',
+        'Warming up GPS… ${formatAccuracyFeet(pos.accuracy)}',
         pos,
       );
       return;
     }
 
-    onProgress('Sampling… ${formatAcc(pos.accuracy)}', pos);
+    onProgress('Sampling… ${formatAccuracyFeet(pos.accuracy)}', pos);
 
     if (isFixUsable(pos, maxAccuracyMeters: double.infinity) &&
         (best == null || pos.accuracy < best!.accuracy)) {
@@ -270,42 +295,32 @@ Future<PreciseMarkResult?> collectPreciseMark({
     if (!isFixUsable(pos, maxAccuracyMeters: kAcceptAccuracyMeters)) {
       return;
     }
-    // Reject huge jumps from current mean if we have samples.
-    if (good.isNotEmpty) {
-      final mean = averageSamples(good, forced: false);
-      final jump = Geolocator.distanceBetween(
-        mean.latitude,
-        mean.longitude,
-        pos.latitude,
-        pos.longitude,
-      );
-      if (jump > math.max(25.0, pos.accuracy * 3)) {
-        return;
-      }
-    }
-
     if (pos.accuracy <= kReadyAccuracyMeters) {
       good.add(pos);
     }
 
     if (good.length >= kMinGoodSamples) {
-      onProgress('Locked ${good.length} samples', pos);
-      finish(averageSamples(good, forced: false));
+      // Jumps are dropped against the median once there are enough
+      // samples to tell which ones are the odd ones out; keep sampling
+      // if that leaves too few.
+      final kept = withoutOutliers(good);
+      if (kept.length >= kMinGoodSamples) {
+        onProgress('Locked ${kept.length} samples', pos);
+        finish(averageSamples(kept, forced: false));
+      } else {
+        good
+          ..clear()
+          ..addAll(kept);
+      }
     }
   }, onError: (e) {
     onProgress('GPS error: $e', null);
     if (good.isNotEmpty) {
-      finish(averageSamples(good, forced: true));
+      finish(averageSamples(withoutOutliers(good), forced: true));
     } else {
       finish(null);
     }
   });
 
   return completer.future;
-}
-
-String formatAcc(double meters) {
-  final ft = meters * 3.280839895;
-  if (ft < 10) return '±${ft.toStringAsFixed(1)} ft';
-  return '±${ft.round()} ft';
 }

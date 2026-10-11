@@ -29,6 +29,34 @@ void main() {
     expect(courseOverGround(speedMps: 1.5, headingDeg: 90), 90);
   });
 
+  test('fix age switches to days after 24 h', () {
+    final now = DateTime.now();
+    expect(formatFixAge(now.subtract(const Duration(hours: 5))), '5h ago');
+    expect(formatFixAge(now.subtract(const Duration(hours: 72))), '3d ago');
+  });
+
+  test('turn description', () {
+    expect(turnDescription(5), 'straight ahead');
+    expect(turnDescription(-45), 'ahead to your left');
+    expect(turnDescription(90), 'to your right');
+    expect(turnDescription(-140), 'behind you to your left');
+    expect(turnDescription(180), 'behind you');
+  });
+
+  test('altitude hint only when clearly beyond vertical error', () {
+    String? hint(double? spot, double here, double acc) => altitudeHint(
+      spotAltitudeMeters: spot,
+      hereAltitudeMeters: here,
+      hereAltitudeAccuracyMeters: acc,
+    );
+    expect(hint(null, 180, 2), isNull);
+    expect(hint(184, 180, 2), isNull); // under 6 m
+    expect(hint(190, 180, 8), isNull); // under 2x accuracy
+    expect(hint(190, 180, 0), isNull); // no vertical accuracy
+    expect(hint(190, 180, 2), 'Spot is ~35 ft above you (rough)');
+    expect(hint(170, 180, 2), 'Spot is ~35 ft below you (rough)');
+  });
+
   test('shortest angle', () {
     expect(shortestAngleDelta(10, 30), closeTo(20, 0.01));
     expect(shortestAngleDelta(350, 10), closeTo(20, 0.01));

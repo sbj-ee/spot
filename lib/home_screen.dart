@@ -542,6 +542,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       arrowHint = 'Point phone forward\n(compass calibrating)';
     }
 
+    final altHint = here == null || spot == null || gpsStale
+        ? null
+        : altitudeHint(
+            spotAltitudeMeters: spot.altitudeMeters,
+            hereAltitudeMeters: here.altitude,
+            hereAltitudeAccuracyMeters: here.altitudeAccuracy,
+          );
+
     final String statusText;
     final Color statusColor;
     if (_status != null) {
@@ -633,14 +641,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                     ),
                             ),
                           ),
-                          Text(
-                            distanceM == null ? '—' : formatDistance(distanceM),
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 64,
-                              fontWeight: FontWeight.w900,
-                              height: 1.0,
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              distanceM == null ? '—' : formatDistance(distanceM),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 64,
+                                fontWeight: FontWeight.w900,
+                                height: 1.0,
+                              ),
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -651,6 +662,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             textAlign: TextAlign.center,
                             style: const TextStyle(color: Colors.white54, fontSize: 16),
                           ),
+                          if (altHint != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              altHint,
+                              key: const Key('altitudeHint'),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white54, fontSize: 16),
+                            ),
+                          ],
                           const SizedBox(height: 6),
                           Text(
                             'Marked ${formatFixAge(spot.markedAt)} · ${formatAccuracyFeet(spot.accuracyMeters)}',
@@ -725,9 +745,14 @@ class _BigButton extends StatelessWidget {
           elevation: 0,
         ),
         onPressed: onPressed,
-        child: Text(
-          label,
-          style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 1),
+        // Long labels and large system fonts shrink instead of wrapping.
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            maxLines: 1,
+            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, letterSpacing: 1),
+          ),
         ),
       ),
     );
@@ -777,12 +802,15 @@ class _ArrowState extends State<_Arrow> {
         ],
       );
     }
-    return AnimatedRotation(
-      turns: _turns,
-      duration: const Duration(milliseconds: 120),
-      child: CustomPaint(
-        size: const Size(220, 220),
-        painter: _ArrowPainter(),
+    return Semantics(
+      label: 'Spot is ${turnDescription(widget.relativeDeg!)}',
+      child: AnimatedRotation(
+        turns: _turns,
+        duration: const Duration(milliseconds: 120),
+        child: CustomPaint(
+          size: const Size(220, 220),
+          painter: _ArrowPainter(),
+        ),
       ),
     );
   }
