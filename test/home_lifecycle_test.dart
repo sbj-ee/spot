@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -182,7 +184,14 @@ void main() {
     expect(find.byKey(const Key('accuracyNote')), findsOneWidget);
     expect(find.text('REPLACE SPOT'), findsOneWidget);
 
-    // The next live fix rewrites the status line; the warning must stay.
+    // Live fixes must not wipe the confirmation while it is held…
+    s.emitPosition(fakePosition(accuracy: 3));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('Marked · ±13 ft · 5 samples'), findsOneWidget);
+
+    // …then the live GPS line returns; the warning must stay.
+    await tester.pump(const Duration(seconds: 7));
     s.emitPosition(fakePosition(accuracy: 3));
     await tester.pump();
     await tester.pump();
@@ -191,6 +200,62 @@ void main() {
       find.text('Precise location declined. Mark will be approximate.'),
       findsOneWidget,
     );
+    await _unmount(tester);
+  });
+
+  testWidgets('permission denied: Mark goes to Settings, not the GPS dialog', (
+    tester,
+  ) async {
+    final s = FakeSensors()
+      ..permission = LocationPermission.deniedForever
+      ..permissionAfterRequest = LocationPermission.deniedForever;
+    await _pumpHome(tester, s);
+
+    await tester.tap(find.text('MARK (WAIT / ANYWAY)'));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump();
+    }
+
+    expect(s.openAppSettingsCalls, 1);
+    expect(find.text('GPS not ready'), findsNothing);
+    await _unmount(tester);
+  });
+
+  testWidgets("away from the spot keeps the screen on; arriving shows YOU'RE HERE", (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'spot.v1': jsonEncode({
+        'lat': 41.8781,
+        'lon': -87.6298,
+        'acc': 4.0,
+        'at': DateTime.now().toIso8601String(),
+        'alt': null,
+      }),
+    });
+    final s = FakeSensors();
+    await _pumpHome(tester, s);
+    await tester.pump();
+    await tester.pump();
+
+    s.emitPosition(fakePosition(lat: 41.8791)); // ~110 m north
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("YOU'RE HERE"), findsNothing);
+    expect(s.keepAwake, isTrue);
+
+    s.emitPosition(fakePosition()); // back at the spot
+    await tester.pump();
+    await tester.pump();
+    expect(find.text("YOU'RE HERE"), findsOneWidget);
+    expect(s.keepAwake, isFalse);
+
+    s.emitPosition(fakePosition(lat: 41.8791));
+    await tester.pump();
+    await tester.pump();
+    expect(s.keepAwake, isTrue);
+    await _background(tester);
+    expect(s.keepAwake, isFalse, reason: 'backgrounding releases the screen');
     await _unmount(tester);
   });
 }

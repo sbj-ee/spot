@@ -19,6 +19,7 @@ const double kReadyAccuracyMeters = 5.0; // ~16 ft — Mark enabled at/under thi
 const double kAcceptAccuracyMeters = 8.0; // drop worse samples while averaging
 const int kMinGoodSamples = 5;
 const Duration kMarkTimeout = Duration(seconds: 25);
+const Duration kForcedMarkTimeout = Duration(seconds: 6); // "Mark anyway"
 const Duration kWarmupIgnore = Duration(seconds: 2); // discard first fixes
 
 /// Key under NSLocationTemporaryUsageDescriptionDictionary in
@@ -135,6 +136,7 @@ class PreciseMarkResult {
 
 bool isFixUsable(Position p, {required double maxAccuracyMeters}) {
   if (!p.latitude.isFinite || !p.longitude.isFinite) return false;
+  if (!p.accuracy.isFinite) return false;
   if (p.accuracy <= 0 || p.accuracy > maxAccuracyMeters) return false;
   // Reject absurd coordinates
   if (p.latitude.abs() > 90 || p.longitude.abs() > 180) return false;
@@ -187,10 +189,15 @@ PreciseMarkResult averageSamples(List<Position> samples, {required bool forced})
 }
 
 /// Collect GNSS samples until [kMinGoodSamples] at ≤ [kReadyAccuracyMeters],
-/// or [timeout]. Returns null if nothing usable (caller may force with stream).
+/// or [timeout] ([kMarkTimeout], or the shorter [kForcedMarkTimeout] when
+/// [forceWithBest]).
+///
+/// On timeout a single best fix is only accepted when it is within
+/// [kAcceptAccuracyMeters], unless [forceWithBest] (the user chose "Mark
+/// anyway"), which takes whatever sane fix was best. Returns null otherwise.
 Future<PreciseMarkResult?> collectPreciseMark({
   required void Function(String status, Position? latest) onProgress,
-  Duration timeout = kMarkTimeout,
+  Duration? timeout,
   bool forceWithBest = false,
 }) async {
   final accuracyCheck = await ensurePreciseAccuracy();
@@ -201,7 +208,7 @@ Future<PreciseMarkResult?> collectPreciseMark({
 
   final started = DateTime.now();
   final good = <Position>[];
-  Position? best; // lowest accuracy value among all seen
+  Position? best; // lowest accuracy value among sane post-warm-up fixes
 
   final stream = Geolocator.getPositionStream(
     locationSettings: highAccuracySettings(),
@@ -218,13 +225,14 @@ Future<PreciseMarkResult?> collectPreciseMark({
     completer.complete(result?.withAccuracyWarning(accuracyWarning));
   }
 
-  timeoutTimer = Timer(timeout, () {
+  final limit = timeout ?? (forceWithBest ? kForcedMarkTimeout : kMarkTimeout);
+  timeoutTimer = Timer(limit, () {
+    final fallback = best;
     if (good.length >= 2) {
       finish(averageSamples(good, forced: true));
-    } else if (best != null && forceWithBest) {
-      finish(averageSamples([best!], forced: true));
-    } else if (best != null) {
-      finish(averageSamples([best!], forced: true));
+    } else if (fallback != null &&
+        (forceWithBest || fallback.accuracy <= kAcceptAccuracyMeters)) {
+      finish(averageSamples([fallback], forced: true));
     } else {
       finish(null);
     }
@@ -232,9 +240,6 @@ Future<PreciseMarkResult?> collectPreciseMark({
 
   sub = stream.listen((pos) {
     final elapsed = DateTime.now().difference(started);
-    if (best == null || pos.accuracy < best!.accuracy) {
-      best = pos;
-    }
 
     // Warm-up: ignore first seconds (often a cached/network jump).
     if (elapsed < kWarmupIgnore) {
@@ -246,6 +251,11 @@ Future<PreciseMarkResult?> collectPreciseMark({
     }
 
     onProgress('Sampling… ${formatAcc(pos.accuracy)}', pos);
+
+    if (isFixUsable(pos, maxAccuracyMeters: double.infinity) &&
+        (best == null || pos.accuracy < best!.accuracy)) {
+      best = pos;
+    }
 
     if (!isFixUsable(pos, maxAccuracyMeters: kAcceptAccuracyMeters)) {
       return;

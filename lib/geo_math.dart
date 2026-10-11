@@ -40,6 +40,14 @@ String formatFixAge(DateTime? timestamp) {
   return '${age.inHours}h ago';
 }
 
+/// Distance under which the bearing to the spot is mostly GPS noise: the
+/// two accuracy radii combined, kept within a sane 6–20 m band.
+double arrivalRadiusMeters(double hereAccuracyMeters, double spotAccuracyMeters) {
+  final sum = hereAccuracyMeters + spotAccuracyMeters;
+  if (!sum.isFinite) return 20.0;
+  return sum.clamp(6.0, 20.0).toDouble();
+}
+
 /// Compass rose letter for absolute bearing (optional UI).
 String bearingCardinal(double bearingDeg) {
   const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
