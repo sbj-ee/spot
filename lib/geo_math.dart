@@ -56,7 +56,40 @@ String formatFixAge(DateTime? timestamp) {
   if (age.inSeconds < 2) return 'just now';
   if (age.inSeconds < 60) return '${age.inSeconds}s ago';
   if (age.inMinutes < 60) return '${age.inMinutes}m ago';
-  return '${age.inHours}h ago';
+  if (age.inHours < 24) return '${age.inHours}h ago';
+  return '${age.inDays}d ago';
+}
+
+/// Spoken direction of the spot for a signed turn in (-180, 180]
+/// (0 = straight ahead, positive = clockwise / to the right).
+String turnDescription(double relativeDeg) {
+  final turn = relativeDeg.abs();
+  final side = relativeDeg < 0 ? 'left' : 'right';
+  if (turn <= 20) return 'straight ahead';
+  if (turn <= 60) return 'ahead to your $side';
+  if (turn <= 120) return 'to your $side';
+  if (turn < 160) return 'behind you to your $side';
+  return 'behind you';
+}
+
+/// Rough "above/below you" hint for the spot (parking levels, hills), or
+/// null unless the height difference clearly exceeds GPS vertical error:
+/// at least 6 m and twice the current fix's vertical accuracy.
+String? altitudeHint({
+  required double? spotAltitudeMeters,
+  required double hereAltitudeMeters,
+  required double hereAltitudeAccuracyMeters,
+}) {
+  if (spotAltitudeMeters == null || !spotAltitudeMeters.isFinite) return null;
+  if (!hereAltitudeMeters.isFinite) return null;
+  // 0 or less means the platform gave no vertical accuracy.
+  if (!hereAltitudeAccuracyMeters.isFinite || hereAltitudeAccuracyMeters <= 0) {
+    return null;
+  }
+  final diff = spotAltitudeMeters - hereAltitudeMeters;
+  if (diff.abs() < math.max(6.0, 2 * hereAltitudeAccuracyMeters)) return null;
+  final feet = (diff.abs() * 3.280839895 / 5).round() * 5;
+  return 'Spot is ~$feet ft ${diff > 0 ? 'above' : 'below'} you (rough)';
 }
 
 /// Distance under which the bearing to the spot is mostly GPS noise: the

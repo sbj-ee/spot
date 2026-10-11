@@ -14,7 +14,7 @@ Public repo: https://github.com/sbj-ee/spot
   - `LocationAccuracy.bestForNavigation` + Android LocationManager (`forceLocationManager`)
   - ~2s GPS warm-up, then average ≥5 samples with horizontal accuracy ≤ ~5 m (~16 ft)
   - Live **Ready / Waiting for better fix** with ±ft; Mark prompts **Mark anyway** if still weak
-  - Discards coarse / jump outliers while sampling
+  - Discards coarse samples, and jumps away from the median position
 - Live arrow = device compass heading vs bearing-to-spot
   - Compass is smoothed and corrected to true north (Android magnetic declination)
   - No compass heading? The arrow follows your GPS direction of travel while walking
@@ -23,6 +23,7 @@ Public repo: https://github.com/sbj-ee/spot
 - Shows live GPS **±accuracy**; turns red with the last-fix age when GPS is lost
 - **You're here** replaces the arrow once the spot is within GPS error
 - Keeps the screen on while you are walking back to a spot
+- Rough **above / below you** hint when the height difference clearly exceeds GPS vertical error
 - Offline after mark (no map tiles, no account)
 
 ## Non-goals (v0)
