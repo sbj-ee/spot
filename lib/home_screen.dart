@@ -37,7 +37,7 @@ class HomeScreen extends StatefulWidget {
   final SpotSensors sensors;
   final SpotStore? store;
 
-  /// Override for tests; defaults to [collectPreciseMark].
+  /// Override for tests; defaults to [collectPreciseMark] fed by [sensors].
   final PreciseMarkCollector? collectMark;
 
   @override
@@ -396,7 +396,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _putStatus('Warming up GPS…');
       });
 
-      final collect = widget.collectMark ?? collectPreciseMark;
+      final collect = widget.collectMark ?? _collectFromSensors;
       final result = await collect(
         forceWithBest: forceAnyway,
         onProgress: (msg, latest) {
@@ -454,6 +454,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  /// Default collector: samples the same sensor seam as the live screen.
+  Future<PreciseMarkResult?> _collectFromSensors({
+    required void Function(String status, Position? latest) onProgress,
+    bool forceWithBest = false,
+  }) => collectPreciseMark(
+    onProgress: onProgress,
+    forceWithBest: forceWithBest,
+    positions: _sensors.positionStream(),
+  );
 
   Future<void> _clearSpot() async {
     await _store.clear();

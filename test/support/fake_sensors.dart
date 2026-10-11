@@ -39,13 +39,19 @@ class FakeSensors implements SpotSensors {
   bool keepAwake = false;
   double headingCorrectionDeg = 0;
 
-  StreamController<Position>? _pos;
+  // Broadcast, like the plugin's stream: the live screen and the mark
+  // collector may both listen. Counts track first-listen / last-cancel.
+  late final StreamController<Position> _pos =
+      StreamController<Position>.broadcast(
+        onListen: () => positionListens++,
+        onCancel: () => positionCancels++,
+      );
   StreamController<double?>? _compass;
 
-  bool get positionListening => _pos?.hasListener ?? false;
+  bool get positionListening => _pos.hasListener;
   bool get compassListening => _compass?.hasListener ?? false;
 
-  void emitPosition(Position p) => _pos?.add(p);
+  void emitPosition(Position p) => _pos.add(p);
   void emitHeading(double? h) => _compass?.add(h);
 
   @override
@@ -68,14 +74,7 @@ class FakeSensors implements SpotSensors {
   }
 
   @override
-  Stream<Position> positionStream() {
-    final c = StreamController<Position>(
-      onListen: () => positionListens++,
-      onCancel: () => positionCancels++,
-    );
-    _pos = c;
-    return c.stream;
-  }
+  Stream<Position> positionStream() => _pos.stream;
 
   @override
   Future<Position?> lastKnownPosition() async => lastKnown;
