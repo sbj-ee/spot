@@ -7,6 +7,8 @@ Position fakePosition({
   double lat = 41.8781,
   double lon = -87.6298,
   double accuracy = 3,
+  double speed = 0,
+  double heading = 0,
 }) => Position(
   latitude: lat,
   longitude: lon,
@@ -14,9 +16,9 @@ Position fakePosition({
   accuracy: accuracy,
   altitude: 180,
   altitudeAccuracy: 2,
-  heading: 0,
+  heading: heading,
   headingAccuracy: 0,
-  speed: 0,
+  speed: speed,
   speedAccuracy: 0,
 );
 
@@ -35,6 +37,7 @@ class FakeSensors implements SpotSensors {
   int compassListens = 0;
   int compassCancels = 0;
   bool keepAwake = false;
+  double headingCorrectionDeg = 0;
 
   StreamController<Position>? _pos;
   StreamController<double?>? _compass;
@@ -76,6 +79,13 @@ class FakeSensors implements SpotSensors {
 
   @override
   Future<Position?> lastKnownPosition() async => lastKnown;
+
+  @override
+  Future<double> headingCorrection({
+    required double latitude,
+    required double longitude,
+    double altitude = 0,
+  }) async => headingCorrectionDeg;
 
   @override
   Future<void> setKeepAwake(bool on) async => keepAwake = on;

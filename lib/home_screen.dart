@@ -12,6 +12,12 @@ import 'spot_store.dart';
 /// A fix older than this no longer counts as live (GPS lost, e.g. indoors).
 const Duration _kStaleFixAge = Duration(seconds: 10);
 
+/// How long the last GPS course keeps steering the arrow after you stop.
+const Duration _kCourseHold = Duration(seconds: 5);
+
+/// Compass changes smaller than this don't redraw the arrow.
+const double _kHeadingRedrawDeg = 0.5;
+
 /// How long a mark result stays on the status line before live GPS returns.
 const Duration _kStatusHold = Duration(seconds: 6);
 
@@ -46,7 +52,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   /// When [_here] arrived on this device (fix timestamps use the GNSS clock).
   DateTime? _hereAt;
-  double? _headingDeg; // device heading (0 = north)
+
+  /// Smoothed compass heading, true north (0 = north). A notifier so the
+  /// ~30 Hz compass only rebuilds the arrow, not the whole screen.
+  final ValueNotifier<double?> _heading = ValueNotifier<double?>(null);
+
+  /// Smoothed heading as the compass reports it, before [_headingCorrection].
+  double? _rawHeadingDeg;
+
+  /// Added to the raw compass heading to get true north (see
+  /// [SpotSensors.headingCorrection]); 0 until the first fix resolves it.
+  double _headingCorrection = 0;
+  bool _headingCorrectionRequested = false;
+  bool _hasCompass = true;
+
+  /// Last GPS direction of travel, used when the compass has no heading.
+  double? _courseDeg;
+  DateTime? _courseAt;
 
   /// Message shown instead of the live GPS line (progress, errors, mark
   /// confirmation). Null shows the live line built from [_here].
@@ -89,6 +111,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _stopSensors();
     _statusHold?.cancel();
+    _heading.dispose();
     super.dispose();
   }
 
@@ -138,6 +161,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _onCompass(double raw) {
+    final smoothed = smoothHeading(_rawHeadingDeg, raw);
+    _rawHeadingDeg = smoothed;
+    final trueDeg = normalizeDegrees(smoothed + _headingCorrection);
+    final shown = _heading.value;
+    if (shown == null ||
+        shortestAngleDelta(shown, trueDeg).abs() >= _kHeadingRedrawDeg) {
+      _heading.value = trueDeg;
+    }
+  }
+
+  /// Resolves the true-north correction once; it barely changes over the
+  /// distances this app covers.
+  Future<void> _loadHeadingCorrection(Position pos) async {
+    if (_headingCorrectionRequested) return;
+    _headingCorrectionRequested = true;
+    try {
+      final deg = await _sensors.headingCorrection(
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        altitude: pos.altitude,
+      );
+      if (deg.isFinite) _headingCorrection = deg;
+    } catch (e) {
+      debugPrint('Spot: heading correction failed: $e');
+    }
+  }
+
   bool get _fixStale {
     final at = _hereAt;
     return at != null && DateTime.now().difference(at) > _kStaleFixAge;
@@ -179,6 +230,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _keepAwake = on;
     _sensors.setKeepAwake(on);
   }
+
+  /// Heading currently steering the arrow from the compass (for tests).
+  @visibleForTesting
+  double? get compassHeadingDeg => _heading.value;
 
   /// True while the background sensors are attached (exposed for tests).
   @visibleForTesting
@@ -238,11 +293,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _here = pos;
         _hereAt = DateTime.now();
+        final course = courseOverGround(
+          speedMps: pos.speed,
+          headingDeg: pos.heading,
+        );
+        if (course != null) {
+          _courseDeg = course;
+          _courseAt = _hereAt;
+        }
         // Fixes are flowing, so the live GPS line takes over, unless the
         // mark flow owns the status or a message is being held.
         if (!_busy && _statusHold == null) _status = null;
       });
       _syncKeepAwake();
+      _loadHeadingCorrection(pos);
     }, onError: (Object e) {
       if (!mounted) return;
       setState(() => _putStatus('GPS error: $e'));
@@ -252,9 +316,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (compass != null) {
       _compassSub = compass.listen((h) {
         if (!mounted || h == null) return;
-        setState(() => _headingDeg = normalizeDegrees(h));
+        _onCompass(h);
       });
     } else {
+      _hasCompass = false;
       setState(() => _putStatus('${_status ?? ''} (no compass)'));
     }
 
@@ -432,11 +497,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final here = _here;
     final spot = _spot;
-    final heading = _headingDeg;
 
     final distanceM = _distanceToSpot();
     double? bearingDeg;
-    double? relativeDeg;
     if (here != null && spot != null) {
       bearingDeg = Geolocator.bearingBetween(
         here.latitude,
@@ -444,9 +507,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         spot.latitude,
         spot.longitude,
       );
-      if (heading != null) {
-        relativeDeg = shortestAngleDelta(heading, bearingDeg);
-      }
     }
 
     final gpsStale = _fixStale;
@@ -456,6 +516,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // A stale fix can't tell us we've arrived; keep showing the arrow then.
     final arrived =
         distanceM != null && !gpsStale && _withinArrival(distanceM);
+
+    // Direction of travel stands in while the compass has no heading.
+    final courseAt = _courseAt;
+    final courseDeg =
+        courseAt != null &&
+            !gpsStale &&
+            DateTime.now().difference(courseAt) <= _kCourseHold
+        ? _courseDeg
+        : null;
+    final String headingNote;
+    if (_heading.value != null) {
+      headingNote = '';
+    } else if (courseDeg != null) {
+      headingNote = ' · by direction of travel';
+    } else {
+      headingNote = ' · no compass';
+    }
+    final String arrowHint;
+    if (here == null) {
+      arrowHint = 'Waiting for GPS…';
+    } else if (!_hasCompass) {
+      arrowHint = 'Walk a few steps\n(no compass · arrow follows your direction)';
+    } else {
+      arrowHint = 'Point phone forward\n(compass calibrating)';
+    }
 
     final String statusText;
     final Color statusColor;
@@ -533,9 +618,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               fit: BoxFit.scaleDown,
                               child: arrived
                                   ? const _Arrived()
-                                  : _Arrow(
-                                      relativeDeg: relativeDeg,
-                                      headingMissing: heading == null,
+                                  : ValueListenableBuilder<double?>(
+                                      valueListenable: _heading,
+                                      builder: (context, compassDeg, _) {
+                                        final headingDeg = compassDeg ?? courseDeg;
+                                        return _Arrow(
+                                          relativeDeg:
+                                              headingDeg == null || bearingDeg == null
+                                              ? null
+                                              : shortestAngleDelta(headingDeg, bearingDeg),
+                                          hint: arrowHint,
+                                        );
+                                      },
                                     ),
                             ),
                           ),
@@ -553,8 +647,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           Text(
                             bearingDeg == null
                                 ? ''
-                                : 'Bearing ${bearingDeg.round()}° ${bearingCardinal(bearingDeg)}'
-                                    '${heading == null ? ' · no compass' : ''}',
+                                : 'Bearing ${bearingDeg.round()}° ${bearingCardinal(bearingDeg)}$headingNote',
                             textAlign: TextAlign.center,
                             style: const TextStyle(color: Colors.white54, fontSize: 16),
                           ),
@@ -641,29 +734,52 @@ class _BigButton extends StatelessWidget {
   }
 }
 
-class _Arrow extends StatelessWidget {
-  const _Arrow({required this.relativeDeg, required this.headingMissing});
+class _Arrow extends StatefulWidget {
+  const _Arrow({required this.relativeDeg, required this.hint});
 
+  /// Turn from where the phone points to the spot; null when unknown.
   final double? relativeDeg;
-  final bool headingMissing;
+
+  /// Shown instead of the arrow while [relativeDeg] is null.
+  final String hint;
+
+  @override
+  State<_Arrow> createState() => _ArrowState();
+}
+
+class _ArrowState extends State<_Arrow> {
+  /// Unwrapped rotation, so 350° → 10° turns 20° forward instead of
+  /// spinning 340° back.
+  late double _turns = (widget.relativeDeg ?? 0) / 360;
+
+  @override
+  void didUpdateWidget(covariant _Arrow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final next = widget.relativeDeg;
+    if (next == null) return;
+    final prev = oldWidget.relativeDeg;
+    _turns = prev == null
+        ? next / 360
+        : _turns + shortestAngleDelta(prev, next) / 360;
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (headingMissing || relativeDeg == null) {
-      return const Column(
+    if (widget.relativeDeg == null) {
+      return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.explore_off, color: Colors.white24, size: 96),
-          SizedBox(height: 8),
-          Text('Point phone forward\n(compass calibrating)',
+          const Icon(Icons.explore_off, color: Colors.white24, size: 96),
+          const SizedBox(height: 8),
+          Text(widget.hint,
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white38, fontSize: 16)),
+              style: const TextStyle(color: Colors.white38, fontSize: 16)),
         ],
       );
     }
-    final rad = degToRad(relativeDeg!);
-    return Transform.rotate(
-      angle: rad,
+    return AnimatedRotation(
+      turns: _turns,
+      duration: const Duration(milliseconds: 120),
       child: CustomPaint(
         size: const Size(220, 220),
         painter: _ArrowPainter(),

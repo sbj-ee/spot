@@ -6,6 +6,16 @@ import 'package:geolocator/geolocator.dart';
 
 /// High-accuracy mark settings. Prefer GNSS over coarse network fixes.
 LocationSettings highAccuracySettings({Duration? interval}) {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+    return AppleSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      activityType: ActivityType.fitness, // on foot
+      distanceFilter: 0,
+      // iOS would otherwise stop updates when it thinks we stood still.
+      pauseLocationUpdatesAutomatically: false,
+      allowBackgroundLocationUpdates: false,
+    );
+  }
   return AndroidSettings(
     accuracy: LocationAccuracy.bestForNavigation,
     distanceFilter: 0,
