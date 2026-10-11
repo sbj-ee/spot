@@ -44,13 +44,17 @@ void main() {
     expect(c.hasListener, isFalse);
   });
 
-  test('samples between ready and accept accuracy are not averaged', () async {
+  test('a sample between ready and accept accuracy counts towards the lock', () async {
     final pending = _collect(c);
-    c.add(fakePosition(accuracy: 7)); // usable, but not good enough to lock
-    for (var i = 0; i < 5; i++) {
+    c.add(fakePosition(accuracy: 7)); // usable; weighted down, not dropped
+    for (var i = 0; i < 4; i++) {
       c.add(fakePosition(accuracy: 4));
     }
-    expect((await pending)!.sampleCount, 5);
+    final result = await pending;
+
+    expect(result!.forced, isFalse);
+    expect(result.sampleCount, 5);
+    expect(result.accuracyMeters, lessThan(kReadyAccuracyMeters));
   });
 
   test('a jump is dropped and sampling continues to five', () async {
@@ -66,16 +70,14 @@ void main() {
     expect(result.latitude, closeTo(41.8781, 1e-7));
   });
 
-  test('timeout with only weak fixes fails unless forced', () async {
+  test('timeout with no fixes fails', () async {
     final pending = _collect(c);
-    c.add(fakePosition(accuracy: 30));
-    c.add(fakePosition(accuracy: 20));
     expect(await pending, isNull);
     expect(c.hasListener, isFalse);
   });
 
-  test('forced mark takes the best weak fix at timeout', () async {
-    final pending = _collect(c, force: true);
+  test('timeout with only weak fixes keeps the best one as provisional', () async {
+    final pending = _collect(c);
     c.add(fakePosition(accuracy: 30));
     c.add(fakePosition(accuracy: 20));
     c.add(fakePosition(accuracy: 40));
@@ -92,10 +94,10 @@ void main() {
     final result = await pending;
 
     expect(result!.forced, isTrue);
-    expect(result.accuracyMeters, 7);
+    expect(result.accuracyMeters, closeTo(7, 1e-9));
   });
 
-  test('timeout averages two or more good samples as forced', () async {
+  test('timeout averages the window as provisional', () async {
     final pending = _collect(c);
     c.add(fakePosition(accuracy: 3));
     c.add(fakePosition(accuracy: 4));
@@ -105,18 +107,16 @@ void main() {
     expect(result.sampleCount, 2);
   });
 
-  test('fixes during warm-up are ignored', () async {
+  test('warm-up fixes never lock; the best one is the fallback', () async {
     final log = <String>[];
-    final pending = _collect(
-      c,
-      force: true,
-      warmup: const Duration(hours: 1),
-      log: log,
-    );
+    final pending = _collect(c, warmup: const Duration(hours: 1), log: log);
     for (var i = 0; i < 5; i++) {
       c.add(fakePosition(accuracy: 3));
     }
-    expect(await pending, isNull);
+    final result = await pending;
+
+    expect(result!.forced, isTrue);
+    expect(result.sampleCount, 1);
     expect(log, everyElement(startsWith('Warming up GPS…')));
   });
 
