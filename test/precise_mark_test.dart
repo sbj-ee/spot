@@ -27,14 +27,15 @@ void main() {
     expect(withoutOutliers([far, near.first]), [far, near.first]);
   });
 
-  test('average reports mean position and worst sample accuracy', () {
+  test('average weights position and accuracy by 1/accuracy²', () {
     final result = averageSamples([
       fakePosition(lat: 41.87810, accuracy: 3),
       fakePosition(lat: 41.87812, accuracy: 5),
     ], forced: false);
-    expect(result.latitude, closeTo(41.87811, 1e-9));
+    // Weights 1/9 and 1/25: the 3 m fix pulls the mean towards itself.
+    expect(result.latitude, closeTo(41.8781052941, 1e-9));
     expect(result.longitude, closeTo(-87.6298, 1e-9));
-    expect(result.accuracyMeters, 5);
+    expect(result.accuracyMeters, closeTo(3.638, 0.001));
     expect(result.sampleCount, 2);
     expect(result.altitudeMeters, 180);
   });

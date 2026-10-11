@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'diag_platform.dart';
+import 'diagnostics.dart';
+import 'diagnostics_screen.dart';
 import 'geo_math.dart';
 import 'precise_mark.dart';
 import 'sensors.dart';
+import 'settings_screen.dart';
 import 'spot_store.dart';
 
 /// A fix older than this no longer counts as live (GPS lost, e.g. indoors).
@@ -32,6 +36,7 @@ class HomeScreen extends StatefulWidget {
     this.sensors = const DeviceSensors(),
     this.store,
     this.collectMark,
+    this.diagnostics,
   });
 
   final SpotSensors sensors;
@@ -39,6 +44,9 @@ class HomeScreen extends StatefulWidget {
 
   /// Override for tests; defaults to [collectPreciseMark] fed by [sensors].
   final PreciseMarkCollector? collectMark;
+
+  /// Diagnostics log; defaults to [DiagnosticsLog.instance].
+  final DiagnosticsLog? diagnostics;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -98,16 +106,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _sensorGeneration = 0;
 
   SpotSensors get _sensors => widget.sensors;
+  late final DiagnosticsLog _diag = widget.diagnostics ?? DiagnosticsLog.instance;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _diag.addListener(_onDiagChanged);
     _bootstrap();
+  }
+
+  bool _diagWasEnabled = false;
+  void _onDiagChanged() {
+    if (!mounted || _diag.enabled == _diagWasEnabled) return;
+    setState(() => _diagWasEnabled = _diag.enabled);
+  }
+
+  Future<void> _initDiagnostics() async {
+    try {
+      await _diag.loadEnabled();
+      final info = await DiagPlatform.deviceInfo();
+      _diag.deviceInfo = info;
+      _diag.provider = DiagPlatform.effectiveProvider(
+        forceLocationManager: kForceLocationManager,
+        info: info,
+      );
+      if (_diag.enabled) {
+        await DiagPlatform.keepScreenOn(true);
+        _diag.note('app_start', 'diagnostics on · provider ${_diag.provider}');
+      }
+    } catch (e) {
+      debugPrint('Spot: diagnostics init failed: $e');
+    }
   }
 
   @override
   void dispose() {
+    _diag.removeListener(_onDiagChanged);
     WidgetsBinding.instance.removeObserver(this);
     _stopSensors();
     _statusHold?.cancel();
@@ -244,6 +279,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() => _spot = spot);
     _syncKeepAwake();
+    _diag.setSpot(spot?.latitude, spot?.longitude);
+    // Not awaited: diagnostics must never delay GPS start.
+    unawaited(_initDiagnostics());
     await _ensurePermissionsAndListen(interactive: true);
   }
 
@@ -288,8 +326,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // Re-subscribing churns the platform GNSS/NMEA listeners for nothing.
     if (_posSub != null) return true;
 
+    _diag.startSession('gps stream start');
     _posSub = _sensors.positionStream().listen((pos) {
       if (!mounted) return;
+      _diag.recordFix(pos);
       setState(() {
         _here = pos;
         _hereAt = DateTime.now();
@@ -396,6 +436,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _putStatus('Warming up GPS…');
       });
 
+      _diag.note('mark_start', forceAnyway ? 'mark anyway' : 'mark',
+          accuracyM: _here?.accuracy);
       final collect = widget.collectMark ?? _collectFromSensors;
       final result = await collect(
         forceWithBest: forceAnyway,
@@ -409,6 +451,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             }
           });
         },
+      );
+      _diag.note(
+        result == null ? 'mark_failed' : (result.forced ? 'mark_forced' : 'mark_locked'),
+        result == null ? 'no usable samples' : '${result.sampleCount} samples',
+        lat: result?.latitude,
+        lon: result?.longitude,
+        accuracyM: result?.accuracyMeters,
       );
 
       if (result == null) {
@@ -432,6 +481,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         altitudeMeters: result.altitudeMeters,
       );
       await _store.save(spot);
+      _diag.setSpot(spot.latitude, spot.longitude);
       await HapticFeedback.heavyImpact();
       if (!mounted) return;
       final warning = result.accuracyWarning;
@@ -440,7 +490,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _accuracyNote = warning;
         _putStatus(
           result.forced
-              ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
+              ? 'Marked (provisional · ${formatAccuracyFeet(result.accuracyMeters)} · '
+                    '${result.sampleCount} ${result.sampleCount == 1 ? 'sample' : 'samples'})'
               : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples',
           hold: _kStatusHold,
         );
@@ -462,11 +513,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }) => collectPreciseMark(
     onProgress: onProgress,
     forceWithBest: forceWithBest,
+    onGate: _diag.recordGate,
     positions: _sensors.positionStream(),
   );
 
   Future<void> _clearSpot() async {
     await _store.clear();
+    _diag.setSpot(null, null);
     await HapticFeedback.selectionClick();
     if (!mounted) return;
     setState(() => _spot = null);
@@ -573,7 +626,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       statusColor = const Color(0xFFFF6666);
     } else {
       statusText =
-          '${gpsReady ? 'Ready' : 'Waiting for better fix'} · $accLabel${gpsWeak ? ' · WEAK' : ''}';
+          '${liveFixStatus(here.accuracy)}${gpsWeak ? ' · WEAK' : ''}';
       statusColor = gpsWeak
           ? const Color(0xFFFF6666)
           : (gpsReady ? const Color(0xFF66FF99) : Colors.white70);
@@ -587,15 +640,52 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'SPOT',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Color(0xFFFFCC00),
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 4,
-                ),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 96,
+                    child: _diag.enabled
+                        ? TextButton(
+                            key: const Key('openDiagnostics'),
+                            onPressed: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => DiagnosticsScreen(log: _diag),
+                              ),
+                            ),
+                            child: const Text('DIAG',
+                                style: TextStyle(color: Color(0xFFFFAA33), fontWeight: FontWeight.w800)),
+                          )
+                        : null,
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'SPOT',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0xFFFFCC00),
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 4,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 96,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        key: const Key('openSettings'),
+                        tooltip: 'Settings',
+                        icon: const Icon(Icons.settings, color: Colors.white54),
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => SettingsScreen(diagnostics: _diag),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               Text(
@@ -727,6 +817,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// Live status line for the current fix: Ready at the mark target,
+/// Converging while fixes are usable for the weighted average, else Waiting.
+String liveFixStatus(double accuracyMeters) {
+  final acc = formatAccuracyFeet(accuracyMeters);
+  if (accuracyMeters <= kReadyAccuracyMeters) return 'Ready · $acc';
+  if (accuracyMeters <= kAcceptAccuracyMeters) return 'Converging · $acc';
+  return 'Waiting for better fix · $acc';
 }
 
 class _BigButton extends StatelessWidget {
