@@ -9,6 +9,12 @@ import 'precise_mark.dart';
 import 'sensors.dart';
 import 'spot_store.dart';
 
+/// A fix older than this no longer counts as live (GPS lost, e.g. indoors).
+const Duration _kStaleFixAge = Duration(seconds: 10);
+
+/// How long a mark result stays on the status line before live GPS returns.
+const Duration _kStatusHold = Duration(seconds: 6);
+
 typedef PreciseMarkCollector = Future<PreciseMarkResult?> Function({
   required void Function(String status, Position? latest) onProgress,
   bool forceWithBest,
@@ -37,14 +43,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   SavedSpot? _spot;
   Position? _here;
+
+  /// When [_here] arrived on this device (fix timestamps use the GNSS clock).
+  DateTime? _hereAt;
   double? _headingDeg; // device heading (0 = north)
+
+  /// Message shown instead of the live GPS line (progress, errors, mark
+  /// confirmation). Null shows the live line built from [_here].
   String? _status;
+
+  /// Running while [_status] is held on screen even though fixes keep coming.
+  Timer? _statusHold;
 
   /// Sticky warning from the last mark (approximate location / failed
   /// precise-accuracy check). Live GPS updates rewrite [_status], so this is
   /// shown on its own line until the next mark.
   String? _accuracyNote;
   bool _busy = false;
+
+  /// True from the Mark tap until sampling starts (permission + dialog).
+  bool _markPending = false;
+  bool _keepAwake = false;
   StreamSubscription<Position>? _posSub;
   StreamSubscription<double?>? _compassSub;
   Timer? _ageTick;
@@ -69,6 +88,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _stopSensors();
+    _statusHold?.cancel();
     super.dispose();
   }
 
@@ -101,6 +121,63 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _compassSub = null;
     _ageTick?.cancel();
     _ageTick = null;
+    _setKeepAwake(false);
+  }
+
+  /// Sets the status override; call inside setState. With [hold] the message
+  /// survives incoming fixes for that long, then the live GPS line returns.
+  void _putStatus(String? msg, {Duration? hold}) {
+    _statusHold?.cancel();
+    _statusHold = null;
+    _status = msg;
+    if (msg != null && hold != null) {
+      _statusHold = Timer(hold, () {
+        _statusHold = null;
+        if (mounted) setState(() => _status = null);
+      });
+    }
+  }
+
+  bool get _fixStale {
+    final at = _hereAt;
+    return at != null && DateTime.now().difference(at) > _kStaleFixAge;
+  }
+
+  bool get _fixReady {
+    final here = _here;
+    return here != null && !_fixStale && here.accuracy <= kReadyAccuracyMeters;
+  }
+
+  double? _distanceToSpot() {
+    final here = _here;
+    final spot = _spot;
+    if (here == null || spot == null) return null;
+    return Geolocator.distanceBetween(
+      here.latitude,
+      here.longitude,
+      spot.latitude,
+      spot.longitude,
+    );
+  }
+
+  /// Close enough that the arrow would only be chasing GPS noise.
+  bool _withinArrival(double distanceM) =>
+      distanceM <=
+      arrivalRadiusMeters(_here!.accuracy, _spot!.accuracyMeters);
+
+  /// Screen stays on only while there is a spot to walk back to, so the
+  /// phone still sleeps normally right after marking and once you arrive.
+  void _syncKeepAwake() {
+    final distanceM = _distanceToSpot();
+    _setKeepAwake(
+      _foreground && distanceM != null && !_withinArrival(distanceM),
+    );
+  }
+
+  void _setKeepAwake(bool on) {
+    if (on == _keepAwake) return;
+    _keepAwake = on;
+    _sensors.setKeepAwake(on);
   }
 
   /// True while the background sensors are attached (exposed for tests).
@@ -111,6 +188,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final spot = await _store.load();
     if (!mounted) return;
     setState(() => _spot = spot);
+    _syncKeepAwake();
     await _ensurePermissionsAndListen(interactive: true);
   }
 
@@ -127,12 +205,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final gen = _sensorGeneration;
     bool stale() => !mounted || !_foreground || gen != _sensorGeneration;
 
-    if (!_busy) setState(() => _status = 'Checking location…');
+    if (!_busy && _posSub == null) {
+      setState(() => _putStatus('Checking location…'));
+    }
 
     final serviceOn = await _sensors.isLocationServiceEnabled();
     if (stale()) return false;
     if (!serviceOn) {
-      setState(() => _status = 'Turn on Location / GPS');
+      setState(() => _putStatus('Turn on Location / GPS'));
       return false;
     }
 
@@ -144,7 +224,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (perm == LocationPermission.denied ||
         perm == LocationPermission.deniedForever ||
         perm == LocationPermission.unableToDetermine) {
-      setState(() => _status = 'Location permission required · tap Mark to open Settings');
+      setState(() => _putStatus('Location permission required · tap Mark to open Settings'));
       if (openSettingsIfBlocked) await _sensors.openAppSettings();
       return false;
     }
@@ -157,16 +237,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         _here = pos;
-        if (_busy) return; // mark flow owns status while sampling
-        if (pos.accuracy <= kReadyAccuracyMeters) {
-          _status = 'Ready · ${formatAccuracyFeet(pos.accuracy)}';
-        } else {
-          _status = 'Waiting for better fix · ${formatAccuracyFeet(pos.accuracy)}';
-        }
+        _hereAt = DateTime.now();
+        // Fixes are flowing, so the live GPS line takes over, unless the
+        // mark flow owns the status or a message is being held.
+        if (!_busy && _statusHold == null) _status = null;
       });
+      _syncKeepAwake();
     }, onError: (Object e) {
       if (!mounted) return;
-      setState(() => _status = 'GPS error: $e');
+      setState(() => _putStatus('GPS error: $e'));
     });
 
     final compass = _sensors.headings();
@@ -176,7 +255,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() => _headingDeg = normalizeDegrees(h));
       });
     } else {
-      setState(() => _status = '${_status ?? ''} (no compass)');
+      setState(() => _putStatus('${_status ?? ''} (no compass)'));
     }
 
     _ageTick = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -189,62 +268,68 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (last != null && !stale() && _here == null) {
         setState(() {
           _here = last;
-          if (!_busy) {
-            _status = 'Waiting for better fix · ${formatAccuracyFeet(last.accuracy)}';
-          }
+          _hereAt = last.timestamp;
+          if (!_busy) _putStatus(null); // live line shows its real age
         });
+        _syncKeepAwake();
       }
     } catch (e) {
       debugPrint('Spot: last known position failed: $e');
     }
 
     if (!stale() && _status == 'Checking location…') {
-      setState(() => _status = 'Waiting for GPS…');
+      setState(() => _putStatus('Waiting for GPS…'));
     }
     return true;
   }
 
   Future<void> _markSpot({bool forceAnyway = false}) async {
-    if (_busy) return;
-
-    final here = _here;
-    final ready = here != null && here.accuracy <= kReadyAccuracyMeters;
-    if (!forceAnyway && !ready) {
-      final choice = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
-          title: const Text('GPS not ready', style: TextStyle(color: Colors.white)),
-          content: Text(
-            here == null
-                ? 'No fix yet. Wait outdoors with a clear sky, or mark with a weaker fix.'
-                : 'Current accuracy ${formatAccuracyFeet(here.accuracy)} (want ≤ ±16 ft). '
-                    'Wait for Ready, or mark anyway.',
-            style: const TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, 'cancel'), child: const Text('Wait')),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'anyway'),
-              child: const Text('Mark anyway', style: TextStyle(color: Color(0xFFFFCC00))),
-            ),
-          ],
-        ),
-      );
-      if (choice != 'anyway') return;
-      forceAnyway = true;
-    }
-
-    setState(() {
-      _busy = true;
-      _status = 'Warming up GPS…';
-    });
+    if (_busy || _markPending) return;
+    _markPending = true;
     try {
+      // Permission first: without it there is no fix, and the weak-GPS
+      // dialog would stand between the user and the Settings jump.
       final ok = await _ensurePermissionsAndListen(
         interactive: true,
         openSettingsIfBlocked: true,
       );
-      if (!ok) return;
+      if (!ok || !mounted) return;
+
+      if (!forceAnyway && !_fixReady) {
+        final here = _here;
+        final String detail;
+        if (here == null) {
+          detail = 'No fix yet. Wait outdoors with a clear sky, or mark with a weaker fix.';
+        } else if (_fixStale) {
+          detail = 'No fresh GPS (last fix ${formatFixAge(_hereAt)}). '
+              'Wait for Ready, or mark anyway.';
+        } else {
+          detail = 'Current accuracy ${formatAccuracyFeet(here.accuracy)} (want ≤ ±16 ft). '
+              'Wait for Ready, or mark anyway.';
+        }
+        final choice = await showDialog<String>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1A1A1A),
+            title: const Text('GPS not ready', style: TextStyle(color: Colors.white)),
+            content: Text(detail, style: const TextStyle(color: Colors.white70)),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, 'cancel'), child: const Text('Wait')),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'anyway'),
+                child: const Text('Mark anyway', style: TextStyle(color: Color(0xFFFFCC00))),
+              ),
+            ],
+          ),
+        );
+        if (choice != 'anyway' || !mounted) return;
+        forceAnyway = true;
+      }
+
+      setState(() {
+        _busy = true;
+        _putStatus('Warming up GPS…');
+      });
 
       final collect = widget.collectMark ?? collectPreciseMark;
       final result = await collect(
@@ -252,15 +337,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         onProgress: (msg, latest) {
           if (!mounted) return;
           setState(() {
-            _status = msg;
-            if (latest != null) _here = latest;
+            _putStatus(msg);
+            if (latest != null) {
+              _here = latest;
+              _hereAt = DateTime.now();
+            }
           });
         },
       );
 
       if (result == null) {
         if (!mounted) return;
-        setState(() => _status = 'Mark failed: no usable GPS samples');
+        setState(
+          () => _putStatus(
+            forceAnyway
+                ? 'Mark failed: no usable GPS samples'
+                : 'Mark failed: fix too weak · try again',
+            hold: _kStatusHold,
+          ),
+        );
         return;
       }
 
@@ -278,14 +373,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _spot = spot;
         _accuracyNote = warning;
-        _status = result.forced
-            ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
-            : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples';
+        _putStatus(
+          result.forced
+              ? 'Marked (best available · ${formatAccuracyFeet(result.accuracyMeters)})'
+              : 'Marked · ${formatAccuracyFeet(result.accuracyMeters)} · ${result.sampleCount} samples',
+          hold: _kStatusHold,
+        );
       });
+      _syncKeepAwake();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _status = 'Mark failed: $e');
+      setState(() => _putStatus('Mark failed: $e', hold: _kStatusHold));
     } finally {
+      _markPending = false;
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -295,6 +395,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await HapticFeedback.selectionClick();
     if (!mounted) return;
     setState(() => _spot = null);
+    _syncKeepAwake();
   }
 
   Future<void> _confirmReplaceOrClear({required bool clearOnly}) async {
@@ -333,16 +434,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final spot = _spot;
     final heading = _headingDeg;
 
-    double? distanceM;
+    final distanceM = _distanceToSpot();
     double? bearingDeg;
     double? relativeDeg;
     if (here != null && spot != null) {
-      distanceM = Geolocator.distanceBetween(
-        here.latitude,
-        here.longitude,
-        spot.latitude,
-        spot.longitude,
-      );
       bearingDeg = Geolocator.bearingBetween(
         here.latitude,
         here.longitude,
@@ -354,10 +449,32 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
     }
 
-    final gpsReady = here != null && here.accuracy <= kReadyAccuracyMeters;
+    final gpsStale = _fixStale;
+    final gpsReady = _fixReady;
     final gpsWeak = here != null && here.accuracy > 30; // ~100 ft
-    final fixAge = formatFixAge(here?.timestamp);
     final accLabel = formatAccuracyFeet(here?.accuracy);
+    // A stale fix can't tell us we've arrived; keep showing the arrow then.
+    final arrived =
+        distanceM != null && !gpsStale && _withinArrival(distanceM);
+
+    final String statusText;
+    final Color statusColor;
+    if (_status != null) {
+      statusText = _status!;
+      statusColor = Colors.white70;
+    } else if (here == null) {
+      statusText = 'Waiting for GPS…';
+      statusColor = Colors.white70;
+    } else if (gpsStale) {
+      statusText = 'No fresh GPS · last fix ${formatFixAge(_hereAt)} · $accLabel';
+      statusColor = const Color(0xFFFF6666);
+    } else {
+      statusText =
+          '${gpsReady ? 'Ready' : 'Waiting for better fix'} · $accLabel${gpsWeak ? ' · WEAK' : ''}';
+      statusColor = gpsWeak
+          ? const Color(0xFFFF6666)
+          : (gpsReady ? const Color(0xFF66FF99) : Colors.white70);
+    }
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -379,15 +496,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 8),
               Text(
-                _status ??
-                    (here == null
-                        ? 'Waiting for GPS…'
-                        : '${gpsReady ? 'Ready' : 'Waiting for better fix'} · $accLabel · $fixAge${gpsWeak ? ' · WEAK' : ''}'),
+                statusText,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: gpsWeak
-                      ? const Color(0xFFFF6666)
-                      : (gpsReady ? const Color(0xFF66FF99) : Colors.white70),
+                  color: statusColor,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                 ),
@@ -419,10 +531,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           Expanded(
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
-                              child: _Arrow(
-                                relativeDeg: relativeDeg,
-                                headingMissing: heading == null,
-                              ),
+                              child: arrived
+                                  ? const _Arrived()
+                                  : _Arrow(
+                                      relativeDeg: relativeDeg,
+                                      headingMissing: heading == null,
+                                    ),
                             ),
                           ),
                           Text(
@@ -554,6 +668,38 @@ class _Arrow extends StatelessWidget {
         size: const Size(220, 220),
         painter: _ArrowPainter(),
       ),
+    );
+  }
+}
+
+/// Shown instead of the arrow once the spot is within GPS error.
+class _Arrived extends StatelessWidget {
+  const _Arrived();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.place, color: Color(0xFFFFCC00), size: 120),
+        SizedBox(height: 8),
+        Text(
+          "YOU'RE HERE",
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: Color(0xFFFFCC00),
+            fontSize: 28,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 2,
+          ),
+        ),
+        SizedBox(height: 4),
+        Text(
+          'Look around · this is as close as GPS gets',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white54, fontSize: 16),
+        ),
+      ],
     );
   }
 }

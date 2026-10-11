@@ -18,7 +18,9 @@ Public repo: https://github.com/sbj-ee/spot
 - Live arrow = device compass heading vs bearing-to-spot
 - Distance in **feet** under ~0.5 mi, else **miles**
 - **Replace** / **Clear** (one spot only)
-- Shows live GPS **±accuracy** and **fix age**
+- Shows live GPS **±accuracy**; turns red with the last-fix age when GPS is lost
+- **You're here** replaces the arrow once the spot is within GPS error
+- Keeps the screen on while you are walking back to a spot
 - Offline after mark (no map tiles, no account)
 
 ## Non-goals (v0)

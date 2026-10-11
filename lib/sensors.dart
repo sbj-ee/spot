@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'precise_mark.dart';
 
@@ -20,6 +22,9 @@ abstract class SpotSensors {
   /// Device heading in degrees (0 = north), or null when the device has no
   /// compass. Events may carry a null heading while uncalibrated.
   Stream<double?>? headings();
+
+  /// Keep the screen on (while walking back to the spot) or release it.
+  Future<void> setKeepAwake(bool on);
 }
 
 /// Real device implementation backed by geolocator + flutter_compass.
@@ -49,4 +54,13 @@ class DeviceSensors implements SpotSensors {
 
   @override
   Stream<double?>? headings() => FlutterCompass.events?.map((e) => e.heading);
+
+  @override
+  Future<void> setKeepAwake(bool on) async {
+    try {
+      await WakelockPlus.toggle(enable: on);
+    } catch (e) {
+      debugPrint('Spot: wakelock failed: $e');
+    }
+  }
 }

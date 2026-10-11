@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SavedSpot {
@@ -23,7 +25,7 @@ class SavedSpot {
         'alt': altitudeMeters,
       };
 
-  static SavedSpot? fromJson(Map<String, Object>? json) {
+  static SavedSpot? fromJson(Map<String, Object?>? json) {
     if (json == null) return null;
     final lat = json['lat'];
     final lon = json['lon'];
@@ -41,43 +43,58 @@ class SavedSpot {
 }
 
 class SpotStore {
-  static const _key = 'spot.v0';
+  /// Whole spot as one JSON string, so a save is a single atomic write and
+  /// can never pair a new latitude with an old longitude.
+  static const _key = 'spot.v1';
+
+  /// Pre-0.1.2 layout: one pref per field. Read once, then migrated.
+  static const _legacyKey = 'spot.v0';
+  static const _legacyFields = ['lat', 'lon', 'acc', 'at', 'alt'];
 
   Future<SavedSpot?> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final lat = prefs.getDouble('$_key.lat');
-    final lon = prefs.getDouble('$_key.lon');
-    final acc = prefs.getDouble('$_key.acc');
-    final at = prefs.getString('$_key.at');
+    final raw = prefs.getString(_key);
+    if (raw != null) {
+      try {
+        final json = jsonDecode(raw);
+        if (json is Map<String, Object?>) return SavedSpot.fromJson(json);
+      } on FormatException {
+        // Corrupt entry: treat as no spot.
+      }
+      return null;
+    }
+
+    final lat = prefs.getDouble('$_legacyKey.lat');
+    final lon = prefs.getDouble('$_legacyKey.lon');
+    final acc = prefs.getDouble('$_legacyKey.acc');
+    final at = prefs.getString('$_legacyKey.at');
     if (lat == null || lon == null || acc == null || at == null) return null;
-    return SavedSpot(
+    final spot = SavedSpot(
       latitude: lat,
       longitude: lon,
       accuracyMeters: acc,
       markedAt: DateTime.tryParse(at) ?? DateTime.now(),
-      altitudeMeters: prefs.getDouble('$_key.alt'),
+      altitudeMeters: prefs.getDouble('$_legacyKey.alt'),
     );
+    await save(spot);
+    return spot;
   }
 
   Future<void> save(SavedSpot spot) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('$_key.lat', spot.latitude);
-    await prefs.setDouble('$_key.lon', spot.longitude);
-    await prefs.setDouble('$_key.acc', spot.accuracyMeters);
-    await prefs.setString('$_key.at', spot.markedAt.toIso8601String());
-    if (spot.altitudeMeters != null) {
-      await prefs.setDouble('$_key.alt', spot.altitudeMeters!);
-    } else {
-      await prefs.remove('$_key.alt');
-    }
+    await prefs.setString(_key, jsonEncode(spot.toJson()));
+    await _removeLegacy(prefs);
   }
 
   Future<void> clear() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('$_key.lat');
-    await prefs.remove('$_key.lon');
-    await prefs.remove('$_key.acc');
-    await prefs.remove('$_key.at');
-    await prefs.remove('$_key.alt');
+    await prefs.remove(_key);
+    await _removeLegacy(prefs);
+  }
+
+  Future<void> _removeLegacy(SharedPreferences prefs) async {
+    for (final field in _legacyFields) {
+      await prefs.remove('$_legacyKey.$field');
+    }
   }
 }

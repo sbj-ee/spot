@@ -34,6 +34,7 @@ class FakeSensors implements SpotSensors {
   int positionCancels = 0;
   int compassListens = 0;
   int compassCancels = 0;
+  bool keepAwake = false;
 
   StreamController<Position>? _pos;
   StreamController<double?>? _compass;
@@ -75,6 +76,9 @@ class FakeSensors implements SpotSensors {
 
   @override
   Future<Position?> lastKnownPosition() async => lastKnown;
+
+  @override
+  Future<void> setKeepAwake(bool on) async => keepAwake = on;
 
   @override
   Stream<double?>? headings() {
