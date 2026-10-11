@@ -1,5 +1,35 @@
 package ee.sbj.spot
 
+import android.hardware.GeomagneticField
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity()
+class MainActivity : FlutterActivity() {
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        // The compass plugin reports magnetic north on Android; Dart asks for
+        // the local declination here to turn it into true north.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ee.sbj.spot/geomag")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "declination") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                val lat = call.argument<Double>("lat")
+                val lon = call.argument<Double>("lon")
+                if (lat == null || lon == null) {
+                    result.error("bad_args", "lat and lon are required", null)
+                    return@setMethodCallHandler
+                }
+                val alt = call.argument<Double>("alt") ?: 0.0
+                val field = GeomagneticField(
+                    lat.toFloat(),
+                    lon.toFloat(),
+                    alt.toFloat(),
+                    System.currentTimeMillis(),
+                )
+                result.success(field.declination.toDouble())
+            }
+    }
+}

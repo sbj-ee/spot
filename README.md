@@ -16,6 +16,8 @@ Public repo: https://github.com/sbj-ee/spot
   - Live **Ready / Waiting for better fix** with ±ft; Mark prompts **Mark anyway** if still weak
   - Discards coarse / jump outliers while sampling
 - Live arrow = device compass heading vs bearing-to-spot
+  - Compass is smoothed and corrected to true north (Android magnetic declination)
+  - No compass heading? The arrow follows your GPS direction of travel while walking
 - Distance in **feet** under ~0.5 mi, else **miles**
 - **Replace** / **Clear** (one spot only)
 - Shows live GPS **±accuracy**; turns red with the last-fix age when GPS is lost

@@ -12,6 +12,25 @@ double shortestAngleDelta(double fromDeg, double toDeg) {
   return (normalizeDegrees(toDeg - fromDeg + 180.0) - 180.0);
 }
 
+/// One step of a circular low-pass filter: move [previous] a fraction
+/// [alpha] of the shortest way toward [next]. Returns [next] when there is
+/// no previous value.
+double smoothHeading(double? previous, double next, {double alpha = 0.3}) {
+  if (previous == null) return normalizeDegrees(next);
+  return normalizeDegrees(previous + alpha * shortestAngleDelta(previous, next));
+}
+
+/// Below this speed the GPS course is noise, not a direction of travel.
+const double kMinCourseSpeedMps = 1.0; // slow walk
+
+/// GPS direction of travel in degrees (true north), or null when standing
+/// still or the platform reported no valid course (iOS uses -1).
+double? courseOverGround({required double speedMps, required double headingDeg}) {
+  if (!speedMps.isFinite || speedMps < kMinCourseSpeedMps) return null;
+  if (!headingDeg.isFinite || headingDeg < 0) return null;
+  return normalizeDegrees(headingDeg);
+}
+
 /// Human distance: feet under 0.5 mi, else miles.
 String formatDistance(double meters) {
   final miles = meters / 1609.344;

@@ -25,6 +25,19 @@ Future<void> _foreground(WidgetTester tester) async {
   await tester.pump();
 }
 
+double? _compassHeading(WidgetTester tester) =>
+    // ignore: avoid_dynamic_calls
+    (tester.state(find.byType(HomeScreen)) as dynamic).compassHeadingDeg
+        as double?;
+
+String _storedSpot() => jsonEncode({
+  'lat': 41.8781,
+  'lon': -87.6298,
+  'acc': 4.0,
+  'at': DateTime.now().toIso8601String(),
+  'alt': null,
+});
+
 bool _sensorsActive(WidgetTester tester) =>
     // ignore: avoid_dynamic_calls
     (tester.state(find.byType(HomeScreen)) as dynamic).sensorsActive as bool;
@@ -256,6 +269,43 @@ void main() {
     expect(s.keepAwake, isTrue);
     await _background(tester);
     expect(s.keepAwake, isFalse, reason: 'backgrounding releases the screen');
+    await _unmount(tester);
+  });
+
+  testWidgets('compass heading is corrected to true north', (tester) async {
+    final s = FakeSensors()..headingCorrectionDeg = 12;
+    await _pumpHome(tester, s);
+
+    s.emitPosition(fakePosition()); // first fix resolves the correction
+    await tester.pump();
+    await tester.pump();
+    s.emitHeading(350);
+    await tester.pump();
+
+    expect(_compassHeading(tester), closeTo(2, 0.01));
+    await _unmount(tester);
+  });
+
+  testWidgets('no compass: arrow follows direction of travel once walking', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'spot.v1': _storedSpot()});
+    final s = FakeSensors()..hasCompass = false;
+    await _pumpHome(tester, s);
+    await tester.pump();
+    await tester.pump();
+
+    s.emitPosition(fakePosition(lat: 41.8791)); // standing still
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(AnimatedRotation), findsNothing);
+    expect(find.textContaining('no compass'), findsWidgets);
+
+    s.emitPosition(fakePosition(lat: 41.8791, speed: 1.6, heading: 180));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(AnimatedRotation), findsOneWidget);
+    expect(find.textContaining('by direction of travel'), findsOneWidget);
     await _unmount(tester);
   });
 }
