@@ -84,3 +84,7 @@ from step 6.
   ```
 
   or export `KEYSTORE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
+
+## Current release key
+
+The release key is the existing Android debug keystore that signed v0.1.3 (alias `androiddebugkey`, cert SHA-256 `ddc25321eff3ea41d3341d3a4d9c7137599c717517f35d9a9c22d6a643f7ceb2`). It is loaded into the four repo secrets, and a backup is kept on Stephen's MacBook.
