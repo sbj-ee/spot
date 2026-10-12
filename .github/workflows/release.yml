@@ -62,8 +62,12 @@ jobs:
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           APK=build/app/outputs/flutter-apk/app-release.apk
           "$APKSIGNER" verify "$APK"
-          FP=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          echo "apksigner: $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK" 2>&1 | grep -i 'digest' || true
+          FP=$("$APKSIGNER" verify --print-certs "$APK" 2>&1 | grep -i 'certificate SHA-256 digest' | head -1 | sed -E 's/.*digest: *//' | tr -d '[:space:]' | tr 'A-F' 'a-f')
           if [ -z "$FP" ]; then echo "::error::could not read signer fingerprint"; exit 1; fi
+          EXPECTED=ddc25321eff3ea41d3341d3a4d9c7137599c717517f35d9a9c22d6a643f7ceb2
+          if [ "$FP" != "$EXPECTED" ]; then echo "::error::signer $FP != expected $EXPECTED"; exit 1; fi
           echo "Signer cert SHA-256: $FP"
           echo "SIGNER_SHA256=$FP" >> "$GITHUB_ENV"
 
