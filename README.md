@@ -81,6 +81,10 @@ flutter devices
 flutter run --release
 ```
 
+### Signing
+
+Release builds are signed by the Release workflow with a stable key so they upgrade in place. See [docs/signing.md](docs/signing.md).
+
 ### Build APK yourself
 
 ```bash

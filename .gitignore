@@ -48,3 +48,9 @@ android/build/
 .dart_tool/
 .flutter-plugins-dependencies
 
+
+# Android release signing (never commit)
+key.properties
+**/key.properties
+*.jks
+*.keystore
