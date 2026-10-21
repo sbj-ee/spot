@@ -76,6 +76,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   /// Last GPS direction of travel, used when the compass has no heading.
   double? _courseDeg;
+
+  /// Speed from the latest fix (m/s); picks GPS course over the compass.
+  double? _speedMps;
   DateTime? _courseAt;
 
   /// Message shown instead of the live GPS line (progress, errors, mark
@@ -209,6 +212,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   /// Resolves the true-north correction once; it barely changes over the
   /// distances this app covers.
+  /// The compass flagged its reading unreliable: stop steering by it until
+  /// a good reading comes back (GPS course, if any, takes over).
+  void _onCompassUnreliable() {
+    _rawHeadingDeg = null;
+    _heading.value = null;
+  }
+
   Future<void> _loadHeadingCorrection(Position pos) async {
     if (_headingCorrectionRequested) return;
     _headingCorrectionRequested = true;
@@ -333,6 +343,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() {
         _here = pos;
         _hereAt = DateTime.now();
+        _speedMps = pos.speed;
         final course = courseOverGround(
           speedMps: pos.speed,
           headingDeg: pos.heading,
@@ -355,7 +366,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final compass = _sensors.headings();
     if (compass != null) {
       _compassSub = compass.listen((h) {
-        if (!mounted || h == null) return;
+        if (!mounted) return;
+        if (h == null) {
+          _onCompassUnreliable();
+          return;
+        }
         _onCompass(h);
       });
     } else {
@@ -589,10 +604,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ? _courseDeg
         : null;
     final String headingNote;
-    if (_heading.value != null) {
-      headingNote = '';
-    } else if (courseDeg != null) {
+    final speedMps = _here == null ? null : _speedMps;
+    final noteChoice = chooseHeading(
+      compassDeg: _heading.value,
+      courseDeg: courseDeg,
+      speedMps: speedMps,
+    );
+    if (noteChoice.byCourse) {
       headingNote = ' · by direction of travel';
+    } else if (noteChoice.deg != null) {
+      headingNote = '';
     } else {
       headingNote = ' · no compass';
     }
@@ -729,7 +750,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   : ValueListenableBuilder<double?>(
                                       valueListenable: _heading,
                                       builder: (context, compassDeg, _) {
-                                        final headingDeg = compassDeg ?? courseDeg;
+                                        final headingDeg = chooseHeading(
+                                          compassDeg: compassDeg,
+                                          courseDeg: courseDeg,
+                                          speedMps: speedMps,
+                                        ).deg;
                                         return _Arrow(
                                           relativeDeg:
                                               headingDeg == null || bearingDeg == null
