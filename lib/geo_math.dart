@@ -23,6 +23,31 @@ double smoothHeading(double? previous, double next, {double alpha = 0.3}) {
 /// Below this speed the GPS course is noise, not a direction of travel.
 const double kMinCourseSpeedMps = 1.0; // slow walk
 
+/// At or above this speed (about 7 mph: driving or cycling) the GPS course
+/// steers the arrow instead of the compass. In a car the compass reads the
+/// phone's angle in its mount and is pulled off by the car's steel and by
+/// magnetic mounts, while the course is the real direction of travel.
+const double kPreferCourseSpeedMps = 3.0;
+
+/// Which heading steers the arrow, in degrees (true north), or null when
+/// there is none. [byCourse] is true when it came from the GPS course.
+typedef HeadingChoice = ({double? deg, bool byCourse});
+
+/// GPS course when moving at [kPreferCourseSpeedMps] or faster, else the
+/// compass, else the course as a fallback.
+HeadingChoice chooseHeading({
+  required double? compassDeg,
+  required double? courseDeg,
+  required double? speedMps,
+}) {
+  final fast =
+      speedMps != null && speedMps.isFinite && speedMps >= kPreferCourseSpeedMps;
+  if (courseDeg != null && (fast || compassDeg == null)) {
+    return (deg: courseDeg, byCourse: true);
+  }
+  return (deg: compassDeg, byCourse: false);
+}
+
 /// GPS direction of travel in degrees (true north), or null when standing
 /// still or the platform reported no valid course (iOS uses -1).
 double? courseOverGround({required double speedMps, required double headingDeg}) {

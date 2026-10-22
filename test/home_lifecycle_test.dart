@@ -308,4 +308,44 @@ void main() {
     expect(find.textContaining('by direction of travel'), findsOneWidget);
     await _unmount(tester);
   });
+
+  double turns(WidgetTester tester) =>
+      tester.widget<AnimatedRotation>(find.byType(AnimatedRotation)).turns;
+
+  testWidgets('driving: arrow follows GPS course, not the compass', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'spot.v1': _storedSpot()});
+    final s = FakeSensors();
+    await _pumpHome(tester, s);
+    await tester.pump();
+    await tester.pump();
+
+    // Spot is due south (180). Phone compass says east; car heads south.
+    s.emitPosition(fakePosition(lat: 41.8791, speed: 10, heading: 180));
+    await tester.pump();
+    s.emitHeading(90);
+    await tester.pump();
+    await tester.pump();
+    expect(turns(tester), closeTo(0, 0.001));
+    expect(find.textContaining('by direction of travel'), findsOneWidget);
+    await _unmount(tester);
+  });
+
+  testWidgets('slow: arrow follows the compass', (tester) async {
+    SharedPreferences.setMockInitialValues({'spot.v1': _storedSpot()});
+    final s = FakeSensors();
+    await _pumpHome(tester, s);
+    await tester.pump();
+    await tester.pump();
+
+    s.emitPosition(fakePosition(lat: 41.8791, speed: 1.5, heading: 180));
+    await tester.pump();
+    s.emitHeading(90);
+    await tester.pump();
+    await tester.pump();
+    expect(turns(tester), closeTo(0.25, 0.001)); // spot 90 deg to the right
+    expect(find.textContaining('by direction of travel'), findsNothing);
+    await _unmount(tester);
+  });
 }

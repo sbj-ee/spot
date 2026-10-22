@@ -7,7 +7,7 @@ Android-first MVP for a Google Pixel 9 (Flutter). Product notes:
 
 Public repo: https://github.com/sbj-ee/spot
 
-## What v0.1.3 does
+## What v0.1.5 does
 
 - Single high-contrast screen
 - **Mark Spot** — high-accuracy GNSS mark (not the first cached fix):
@@ -21,6 +21,8 @@ Public repo: https://github.com/sbj-ee/spot
 - Live arrow = device compass heading vs bearing-to-spot
   - Compass is smoothed and corrected to true north (Android magnetic declination)
   - No compass heading? The arrow follows your GPS direction of travel while walking
+  - Moving at 3 m/s (~7 mph) or faster, e.g. driving, the arrow follows the GPS direction of travel instead of the compass
+  - Compass readings the platform flags as unreliable are ignored
 - Distance in **feet** under ~0.5 mi, else **miles**
 - **Replace** / **Clear** (one spot only)
 - Shows live GPS **±accuracy**; turns red with the last-fix age when GPS is lost

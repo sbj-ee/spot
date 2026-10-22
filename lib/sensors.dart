@@ -65,7 +65,12 @@ class DeviceSensors implements SpotSensors {
   Future<Position?> lastKnownPosition() => Geolocator.getLastKnownPosition();
 
   @override
-  Stream<double?>? headings() => FlutterCompass.events?.map((e) => e.heading);
+  Stream<double?>? headings() {
+    final events = FlutterCompass.events;
+    if (events == null) return null;
+    final filter = CompassReliabilityFilter();
+    return events.map((e) => filter.heading(e.heading, e.accuracy));
+  }
 
   @override
   Future<double> headingCorrection({
@@ -90,5 +95,26 @@ class DeviceSensors implements SpotSensors {
     } catch (e) {
       debugPrint('Spot: wakelock failed: $e');
     }
+  }
+}
+
+/// Drops compass readings the plugin flags as unreliable.
+///
+/// flutter_compass 0.8.1 exposes only [CompassEvent.accuracy]: on Android
+/// 15/30/45 degrees for high/medium/low sensor accuracy, and null for
+/// SENSOR_STATUS_UNRELIABLE. Null is also what a device that never reports
+/// accuracy sends, so null only counts as unreliable once that device has
+/// reported a real accuracy at least once; otherwise the compass would go
+/// dark on phones that never report one.
+class CompassReliabilityFilter {
+  bool _seenAccuracy = false;
+
+  /// [heading] when it is usable, else null (treated as uncalibrated).
+  double? heading(double? heading, double? accuracy) {
+    if (accuracy != null) {
+      _seenAccuracy = true;
+      return heading;
+    }
+    return _seenAccuracy ? null : heading;
   }
 }
