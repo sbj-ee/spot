@@ -12,6 +12,8 @@ import 'precise_mark.dart';
 import 'sensors.dart';
 import 'settings_screen.dart';
 import 'spot_store.dart';
+import 'update/update_ui.dart';
+import 'update/updater.dart';
 
 /// A fix older than this no longer counts as live (GPS lost, e.g. indoors).
 const Duration _kStaleFixAge = Duration(seconds: 10);
@@ -117,6 +119,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _diag.addListener(_onDiagChanged);
     _bootstrap();
+    if (updaterSupported) _maybeCheckForUpdates();
+  }
+
+  /// Opt-in launch-time update check (Settings > Check for updates at startup).
+  Future<void> _maybeCheckForUpdates() async {
+    if (!await UpdatePrefs.checkAtStartup()) return;
+    await Future<void>.delayed(const Duration(seconds: 3));
+    if (mounted) await checkForUpdates(context, manual: false);
   }
 
   bool _diagWasEnabled = false;
