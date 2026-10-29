@@ -1,6 +1,11 @@
 package ee.sbj.spot
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import java.io.File
 import android.hardware.GeomagneticField
 import android.location.LocationManager
 import android.os.Build
@@ -34,6 +39,43 @@ class MainActivity : FlutterActivity() {
                     System.currentTimeMillis(),
                 )
                 result.success(field.declination.toDouble())
+            }
+        // In-app updater: Dart downloads the APK into cache/updates/ and checks
+        // its minisign-signed SHA-256 first; this only opens the system
+        // installer, which asks the user and checks the app certificate.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ee.sbj.spot/installer")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "cacheDir" -> result.success(cacheDir.absolutePath)
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        val updates = File(cacheDir, "updates").canonicalFile
+                        val file = path?.let { File(it).canonicalFile }
+                        if (file == null || file.parentFile != updates || !file.isFile) {
+                            result.error("bad_path", "APK must be in cache/updates", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()
+                        ) {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:$packageName"),
+                                ),
+                            )
+                            result.success("needs_permission")
+                            return@setMethodCallHandler
+                        }
+                        val uri = FileProvider.getUriForFile(this, "$packageName.updates", file)
+                        val intent = Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(uri, "application/vnd.android.package-archive")
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                        result.success("started")
+                    }
+                    else -> result.notImplemented()
+                }
             }
         // Small diagnostics channel. Read-only device/provider facts plus a
         // keep-screen-on switch for walk tests. Every call is best-effort:

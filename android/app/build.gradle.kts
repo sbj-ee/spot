@@ -81,3 +81,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // FileProvider for handing the verified update APK to the installer.
+    implementation("androidx.core:core:1.13.1")
+}

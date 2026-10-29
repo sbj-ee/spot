@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the verified update APK under cache/updates/ is shared, read-only,
+     with Android's package installer. -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>
