@@ -332,6 +332,34 @@ void main() {
     await _unmount(tester);
   });
 
+  testWidgets('walking straight learns and applies a compass offset', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({'spot.v1': _storedSpot()});
+    final s = FakeSensors();
+    await _pumpHome(tester, s);
+    await tester.pump();
+    await tester.pump();
+
+    // Walking due east by GPS, but the compass reads 15 deg counterclockwise.
+    s.emitHeading(75);
+    await tester.pump();
+    for (var i = 0; i < 30; i++) {
+      s.emitPosition(fakePosition(lat: 41.8791, speed: 1.4, heading: 90));
+      await tester.pump();
+    }
+    await tester.pump();
+
+    final offset =
+        // ignore: avoid_dynamic_calls
+        (tester.state(find.byType(HomeScreen)) as dynamic).compassOffsetDeg
+            as double;
+    expect(offset, closeTo(15, 1.5));
+    expect(_compassHeading(tester), closeTo(75 + offset, 0.6));
+    expect(find.textContaining('compass adj +'), findsOneWidget);
+    await _unmount(tester);
+  });
+
   testWidgets('slow: arrow follows the compass', (tester) async {
     SharedPreferences.setMockInitialValues({'spot.v1': _storedSpot()});
     final s = FakeSensors();
