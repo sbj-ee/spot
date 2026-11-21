@@ -59,7 +59,7 @@ void main() {
 
   test('a turn inside the window is not an observation', () {
     final e = CompassOffsetEstimator();
-    for (final c in [90.0, 90, 120, 150, 180]) {
+    for (final c in <double>[90, 90, 120, 150, 180]) {
       e.addFix(
         courseDeg: c,
         compassTrueDeg: c - 10,
