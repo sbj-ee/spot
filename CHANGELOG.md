@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1+10 (2026-11-21)
 
 ### Added
 - **Compass auto-correction.** While you walk in a straight line at walking
@@ -15,6 +15,10 @@
 ### Tests
 - Offset estimator (learning, wrap across north, rejected fixes, turns,
   gaps, cap) and a home-screen test that walking straight corrects the arrow.
+
+### Build
+- Gradle 9.5.0, Android Gradle Plugin 9.3.1, Kotlin 2.4.20 and Java 17,
+  required by Flutter 3.50.
 
 ## 0.2.0+9 (2026-10-29)
 
