@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'compass_offset.dart';
 import 'diag_platform.dart';
 import 'diagnostics.dart';
 import 'diagnostics_screen.dart';
@@ -75,6 +76,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   double _headingCorrection = 0;
   bool _headingCorrectionRequested = false;
   bool _hasCompass = true;
+
+  /// Compass heading in true degrees before [_compassOffset]; what the
+  /// offset is learned against.
+  double? _compassTrueDeg;
+
+  /// Learns a steady compass error from straight-line walking.
+  final CompassOffsetEstimator _compassOffset = CompassOffsetEstimator();
 
   /// Last GPS direction of travel, used when the compass has no heading.
   double? _courseDeg;
@@ -212,9 +220,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _onCompass(double raw) {
     final smoothed = smoothHeading(_rawHeadingDeg, raw);
     _rawHeadingDeg = smoothed;
-    final trueDeg = normalizeDegrees(smoothed + _headingCorrection);
+    _compassTrueDeg = normalizeDegrees(smoothed + _headingCorrection);
+    _showCompass();
+  }
+
+  /// Publishes the compass heading with the learned offset applied.
+  void _showCompass({bool force = false}) {
+    final compassTrue = _compassTrueDeg;
+    if (compassTrue == null) return;
+    final trueDeg = normalizeDegrees(compassTrue + _compassOffset.offsetDeg);
     final shown = _heading.value;
-    if (shown == null ||
+    if (force ||
+        shown == null ||
         shortestAngleDelta(shown, trueDeg).abs() >= _kHeadingRedrawDeg) {
       _heading.value = trueDeg;
     }
@@ -226,6 +243,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// a good reading comes back (GPS course, if any, takes over).
   void _onCompassUnreliable() {
     _rawHeadingDeg = null;
+    _compassTrueDeg = null;
     _heading.value = null;
   }
 
@@ -289,6 +307,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Heading currently steering the arrow from the compass (for tests).
   @visibleForTesting
   double? get compassHeadingDeg => _heading.value;
+
+  /// Learned compass offset in degrees (for tests).
+  @visibleForTesting
+  double get compassOffsetDeg => _compassOffset.offsetDeg;
 
   /// True while the background sensors are attached (exposed for tests).
   @visibleForTesting
@@ -362,6 +384,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _courseDeg = course;
           _courseAt = _hereAt;
         }
+        final learned = _compassOffset.addFix(
+          courseDeg: course,
+          compassTrueDeg: _compassTrueDeg,
+          speedMps: pos.speed,
+          accuracyMeters: pos.accuracy,
+          courseAccuracyDeg: pos.headingAccuracy,
+        );
+        if (learned) _showCompass(force: true);
         // Fixes are flowing, so the live GPS line takes over, unless the
         // mark flow owns the status or a message is being held.
         if (!_busy && _statusHold == null) _status = null;
@@ -623,7 +653,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (noteChoice.byCourse) {
       headingNote = ' · by direction of travel';
     } else if (noteChoice.deg != null) {
-      headingNote = '';
+      final adj = _compassOffset.offsetDeg.round();
+      headingNote = adj == 0
+          ? ''
+          : ' · compass adj ${adj > 0 ? '+' : '−'}${adj.abs()}°';
     } else {
       headingNote = ' · no compass';
     }

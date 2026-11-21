@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Compass auto-correction.** While you walk in a straight line at walking
+  speed with a good fix, Spot compares the compass with the GPS direction
+  of travel and learns any steady error (a magnetic case, a mount plate, a
+  poorly calibrated sensor), then corrects the arrow by it. It learns from
+  5-second straight stretches, eases in, ignores turns, driving and windows
+  where the phone clearly isn't pointing where you walk (over 40° off), and
+  never corrects by more than 30°. The bearing line shows
+  "· compass adj +15°" while a correction is applied.
+
+### Tests
+- Offset estimator (learning, wrap across north, rejected fixes, turns,
+  gaps, cap) and a home-screen test that walking straight corrects the arrow.
+
 ## 0.2.0+9 (2026-10-29)
 
 ### Added
